@@ -586,8 +586,7 @@ function newProfile(cont) {
 function newProfileCB(data, ioArgs) {
 	if(data.items.failed) {
 		document.body.style.cursor = 'default';
-		dojo.byId('nperrormsg').innerHTML =
-		   'A profile with this name already exists';
+		dojo.byId('nperrormsg').innerHTML = data.items.errmsg;
 		return;
 	}
 	dijit.byId('messages').hide();
