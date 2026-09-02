@@ -658,7 +658,12 @@ sub setup_capture_base_image {
 	OS_ID: for my $os_id (keys %$os_info) {
 		my $osinstalltype_name = $os_info->{$os_id}{installtype};
 		
-		# Remove keys where the name begins with esx - deprecated OS type
+		# Filter leftover installtype 'vmwareesx' from older VCL trees.
+		# This tree's OSinstalltype seeds are only kickstart/none/partimage/
+		# vmware/vbox/openstack — there is no vmwareesx installtype. Nested
+		# ESXi guests use installtype 'vmware' with OS name 'vmwareesxi' and
+		# module os_esxi (see mysql/vcl.sql). Do not treat OS names that
+		# begin with 'esx' as deprecated.
 		if ($osinstalltype_name =~ /^vmwareesx/i) {
 			delete $os_info->{$os_id};
 			next;

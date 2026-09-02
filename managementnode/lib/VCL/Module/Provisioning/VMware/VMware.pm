@@ -204,6 +204,18 @@ our %VM_OS_CONFIGURATION = (
 		"cpu_socket_limit" => 64,
 	},
 	
+	# Nested ESXi guest (image OS name contains 'esxi', e.g. vmwareesxi, esxi4.1):
+	"esxi-x86" => {
+		"guestOS" => "vmkernel",
+		"ethernet-virtualDev" => "e1000",
+		"scsi-virtualDev" => "lsiLogic",
+	},
+	"esxi-x86_64" => {
+		"guestOS" => "vmkernel6",
+		"ethernet-virtualDev" => "e1000",
+		"scsi-virtualDev" => "lsiLogic",
+	},
+	
 	# Default Windows configuration if Windows version isn't found above:
 	"windows-x86" => {
 		"guestOS" => "windows7",
@@ -5054,8 +5066,14 @@ sub get_vm_os_configuration {
 	}
 	
 	if (!$self->{vm_os_configuration}) {
+		# Nested ESXi OS rows are type 'linux' (OStype table has no esxi value)
+		# but must use a vmkernel guestOS, not otherlinux-64.
+		if ($image_os_name =~ /esxi/i && $VM_OS_CONFIGURATION{"esxi-$image_architecture"}) {
+			$self->{vm_os_configuration} = $VM_OS_CONFIGURATION{"esxi-$image_architecture"};
+			notify($ERRORS{'DEBUG'}, 0, "returning ESXi guest OS configuration for image OS $image_os_name, architecture: $image_architecture\n" . format_data($self->{vm_os_configuration}));
+		}
 		# Check if the default key exists for the OS type - 'windows', 'linux', etc.
-		if ($self->{vm_os_configuration} = $VM_OS_CONFIGURATION{"$image_os_type-$image_architecture"}) {
+		elsif ($self->{vm_os_configuration} = $VM_OS_CONFIGURATION{"$image_os_type-$image_architecture"}) {
 			notify($ERRORS{'DEBUG'}, 0, "returning default '$image_os_type' OS configuration, architecture: $image_architecture\n" . format_data($self->{vm_os_configuration}));
 		}
 		else {
@@ -5162,6 +5180,12 @@ sub get_vm_guest_os {
 		'^windows[^\d]*2008'				=> '"windows7srv'	. $guest_os_64_bit_section . '"',
 		'^windows[^\d]*2012'				=> '"windows8srv'	. $guest_os_64_bit_section . '"',
 		'^windows[^\d]*2016'				=> '"windows9srv'	. $guest_os_64_bit_section . '"',
+		'^vmware esxi[^\d]*4'			=> '"vmkernel"',
+		'^vmware esxi[^\d]*5'			=> '"vmkernel5"',
+		'^vmware esxi[^\d]*6\.5'		=> '"vmkernel65"',
+		'^vmware esxi[^\d]*6'			=> '"vmkernel6"',
+		'^vmware esxi[^\d]*7'			=> '"vmkernel7"',
+		'^vmware esxi'					=> '"vmkernel6"',
 	};
 	
 	my $guest_os;
