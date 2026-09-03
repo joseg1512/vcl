@@ -1729,7 +1729,8 @@ INSERT IGNORE INTO `computerloadflow` (`computerloadstateid`, `nextstateid`, `ty
 INSERT IGNORE INTO `connectmethod` (`id`, `name`, `description`, `connecttext`, `servicename`, `startupscript`) VALUES
 (1, 'SSH', 'SSH for Linux & Unix', 'You will need to have an X server running on your local computer and use an SSH client to connect to the system. If you did not click on the <b>Connect!</b> button from the computer you will be using to access the VCL system, you will need to return to the <strong>Current Reservations</strong> page and click the <strong>Connect!</strong> button from a web browser running on the same computer from which you will be connecting to the VCL system. Otherwise, you may be denied access to the remote computer.<br><br>\r\nUse the following information when you are ready to connect:<br>\r\n<UL>\r\n<LI><b>Remote Computer</b>: #connectIP#</LI>\r\n<LI><b>User ID</b>: #userid#</LI>\r\n<LI><b>Password</b>: #password#<br></LI>\r\n</UL>\r\n<b>NOTE</b>: The given password is for <i>this reservation only</i>. You will be given a different password for any other reservations.<br>\r\n<strong><big>NOTE:</big> You cannot use the Windows Remote Desktop Connection to connect to this computer. You must use an ssh client.</strong>', 'ext_sshd', '/etc/init.d/ext_sshd'),
 (2, 'RDP', 'Remote Desktop for Windows', 'You will need to use a Remote Desktop program to connect to the system. If you did not click on the <b>Connect!</b> button from the computer you will be using to access the VCL system, you will need to return to the <strong>Current Reservations</strong> page and click the <strong>Connect!</strong> button from a web browser running on the same computer from which you will be connecting to the VCL system. Otherwise, you may be denied access to the remote computer.<br><br>\r\n\r\nUse the following information when you are ready to connect:<br>\r\n<UL>\r\n<LI><b>Remote Computer</b>: #connectIP#</LI>\r\n<LI><b>User ID</b>: #userid#</LI>\r\n<LI><b>Password</b>: #password#<br></LI>\r\n</UL>\r\n<b>NOTE</b>: The given password is for <i>this reservation only</i>. You will be given a different password for any other reservations.<br>\r\n<br>\r\nFor automatic connection, you can download an RDP file that can be opened by the Remote Desktop Connection program.<br><br>\r\n', 'TermService', NULL),
-(3, 'iRAPP RDP', 'Remote Desktop for OS X', 'You will need to use a Remote Desktop program to connect to the system. If you did not click on the <b>Connect!</b> button from the computer you will be using to access the VCL system, you will need to return to the <strong>Current Reservations</strong> page and click the <strong>Connect!</strong> button from a web browser running on the same computer from which you will be connecting to the VCL system. Otherwise, you may be denied access to the remote computer.<br><br>\r\n\r\nUse the following information when you are ready to connect:<br>\r\n<UL>\r\n<LI><b>Remote Computer</b>: #connectIP#</LI>\r\n<LI><b>User ID</b>: #userid#</LI>\r\n<LI><b>Password</b>: #password#<br></LI>\r\n</UL>\r\n<b>NOTE</b>: The given password is for <i>this reservation only</i>. You will be given a different password for any other reservations.<br>\r\n<br>\r\nFor automatic connection, you can download an RDP file that can be opened by the Remote Desktop Connection program.<br><br>\r\n', NULL, NULL);
+(3, 'iRAPP RDP', 'Remote Desktop for OS X', 'You will need to use a Remote Desktop program to connect to the system. If you did not click on the <b>Connect!</b> button from the computer you will be using to access the VCL system, you will need to return to the <strong>Current Reservations</strong> page and click the <strong>Connect!</strong> button from a web browser running on the same computer from which you will be connecting to the VCL system. Otherwise, you may be denied access to the remote computer.<br><br>\r\n\r\nUse the following information when you are ready to connect:<br>\r\n<UL>\r\n<LI><b>Remote Computer</b>: #connectIP#</LI>\r\n<LI><b>User ID</b>: #userid#</LI>\r\n<LI><b>Password</b>: #password#<br></LI>\r\n</UL>\r\n<b>NOTE</b>: The given password is for <i>this reservation only</i>. You will be given a different password for any other reservations.<br>\r\n<br>\r\nFor automatic connection, you can download an RDP file that can be opened by the Remote Desktop Connection program.<br><br>\r\n', NULL, NULL),
+(4, 'vSphere', 'VMware ESXi Host Client / vSphere', 'You can manage this nested ESXi host with the Host Client in a web browser or with a vSphere/SSH client.<br><br>\r\nUse the following information when you are ready to connect:<br>\r\n<UL>\r\n<LI><b>Remote Computer</b>: #connectIP#</LI>\r\n<LI><b>User ID</b>: #userid#</LI>\r\n<LI><b>Password</b>: #password#<br></LI>\r\n<LI><b>HTTPS</b>: https://#connectIP#/</LI>\r\n</UL>\r\n<b>NOTE</b>: The given password is for <i>this reservation only</i>. You will be given a different password for any other reservations.', '', NULL);
 
 --
 -- Dumping data for table `connectmethodmap`
@@ -1743,7 +1744,11 @@ INSERT IGNORE INTO `connectmethodmap` (`connectmethodid`, `OStypeid`, `OSid`, `i
 (1, 2, NULL, NULL, 0, NULL),
 (1, 3, NULL, NULL, 0, NULL),
 (2, 1, NULL, NULL, 0, NULL),
-(3, 4, NULL, NULL, 0, NULL);
+(3, 4, NULL, NULL, 0, NULL),
+(4, NULL, 38, NULL, 0, 1),
+(4, NULL, 59, NULL, 0, 1),
+(4, NULL, 38, NULL, 0, NULL),
+(4, NULL, 59, NULL, 0, NULL);
 
 --
 -- Dumping data for table `connectmethodport`
@@ -1752,7 +1757,9 @@ INSERT IGNORE INTO `connectmethodmap` (`connectmethodid`, `OStypeid`, `OSid`, `i
 INSERT INTO `connectmethodport` (`id`, `connectmethodid`, `port`, `protocol`) VALUES
 (1, 1, 22, 'TCP'),
 (2, 2, 3389, 'TCP'),
-(3, 3, 3389, 'TCP');
+(3, 3, 3389, 'TCP'),
+(4, 4, 443, 'TCP'),
+(5, 4, 902, 'TCP');
 
 -- 
 -- Dumping data for table `documentation`
@@ -1907,6 +1914,7 @@ INSERT IGNORE INTO `OS` (`id`, `name`, `prettyname`, `type`, `installtype`, `sou
 (36, 'vmwarelinux', 'Generic Linux (VMware)', 'linux', 'vmware', 'vmware_images', 5),
 (37, 'vmwarewin2003', 'Windows 2003 Server (VMware)', 'windows', 'vmware', 'vmware_images', 13),
 (38, 'esxi4.1', 'VMware ESXi 4.1', 'linux', 'kickstart', 'esxi4.1', 25),
+(59, 'vmwareesxi', 'VMware ESXi (VMware)', 'linux', 'vmware', 'vmware_images', 25),
 (39, 'vmwareosx', 'OSX Snow Leopard (VMware)', 'osx', 'vmware', 'vmware_images', 26),
 (40, 'rhel6', 'Red Hat Enterprise 6 (Kickstart)', 'linux', 'kickstart', 'rhel6', 5),
 (41, 'rh6image', 'Red Hat Enterprise 6 (Bare Metal)', 'linux', 'partimage', 'image', 5),
@@ -1931,6 +1939,7 @@ INSERT IGNORE INTO `OS` (`id`, `name`, `prettyname`, `type`, `installtype`, `sou
 UPDATE OS SET minram = 1024 WHERE name REGEXP 'win.*';
 UPDATE OS SET minram = 2048 WHERE name REGEXP 'win.*(7|8|10|2008|2012)';
 UPDATE OS SET minram = 1024 WHERE name REGEXP '(centos|rh|rhel)(5|6|7)';
+UPDATE OS SET minram = 4096 WHERE name REGEXP 'esxi';
 
 -- 
 -- Dumping data for table `OSinstalltype`

@@ -1,0 +1,37 @@
+Nested ESXi image lifecycle (Linux vs ESXi)
+==========================================
+
+The authoritative map lives in the POD of
+managementnode/lib/VCL/Module/OS/Linux/ESXi.pm.
+
+Summary:
+- Orchestrator is unchanged: image.pm -> OS post_reservation ->
+  provisioner.capture() (OS pre_capture, then VMware vmdk copy) ->
+  OS post_capture. new.pm load/reserve, reserved.pm grant_access,
+  reclaim.pm sanitize.
+- ESXi.pm overrides Linux-only userland. It calls VCL::Module::OS
+  common helpers, not Linux.pm SUPER, for capture/network/user paths.
+- Guest prep uses esxcli / esxcfg-* / vim-cmd. Provisioner capture
+  (VMware.pm) is unchanged. Nested HV (vhv.enable) is already added
+  by VMware.pm when the host reports nestedHVSupported.
+- Nested ESXi images use OS name vmwareesxi, installtype vmware,
+  module os_esxi. The setup_capture_base_image filter for
+  installtype /^vmwareesx/ is leftover deprecated data and is not
+  the nested-ESXi installtype in this tree.
+
+Linux command                 ESXi replacement
+----------------------------------------------------------
+useradd / userdel / id        esxcli system account add/remove/list
+passwd --stdin                esxcli system account set
+sudoers                       esxcli system permission set/unset
+ifconfig / ifcfg-*            esxcli network ip interface
+route / route-*               esxcli network ip route ipv4
+rdate / ntpd files            esxcli system ntp set
+hostname / sysconfig/network  esxcli system hostname set
+iptables / firewalld          esxcli network firewall ruleset
+netstat -anp                  esxcli network ip connection list
+/proc/cpuinfo                 esxcli hardware cpu global get
+/etc/redhat-release           vmware -v
+mount -t nfs                  esxcli storage nfs add / esxcfg-nas
+shutdown -h/-r                esxcli system shutdown poweroff/reboot
+ext_sshd / groupadd vcl       skipped (single TSM-SSH, no GNU groups)

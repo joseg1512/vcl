@@ -1844,6 +1844,8 @@ INSERT IGNORE INTO `OS` (`name`, `prettyname`, `type`, `installtype`, `sourcepat
 INSERT IGNORE INTO `OS` (`name`, `prettyname`, `type`, `installtype`, `sourcepath`, `moduleid`) VALUES ('vmwarelinux', 'Generic Linux (VMware)', 'linux', 'vmware', 'vmware_images', (SELECT `id` FROM `module` WHERE `name` LIKE 'os_linux'));
 INSERT IGNORE INTO `OS` (`name`, `prettyname`, `type`, `installtype`, `sourcepath`, `moduleid`) VALUES ('vmwarewin2003', 'Windows 2003 Server (VMware)', 'windows', 'vmware', 'vmware_images', (SELECT `id` FROM `module` WHERE `name` LIKE 'os_win2003'));
 INSERT IGNORE INTO `OS` (`name`, `prettyname`, `type`, `installtype`, `sourcepath`, `moduleid`) VALUES ('esxi4.1', 'VMware ESXi 4.1 (Kickstart)', 'linux', 'kickstart', 'esxi4.1', (SELECT `id` FROM `module` WHERE `name` LIKE 'os_esxi'));
+INSERT IGNORE INTO `OS` (`name`, `prettyname`, `type`, `installtype`, `sourcepath`, `moduleid`) VALUES ('vmwareesxi', 'VMware ESXi (VMware)', 'linux', 'vmware', 'vmware_images', (SELECT `id` FROM `module` WHERE `name` LIKE 'os_esxi'));
+UPDATE OS SET minram = 4096 WHERE name REGEXP 'esxi';
 INSERT IGNORE INTO `OS` (`name`, `prettyname`, `type`, `installtype`, `sourcepath`, `moduleid`) VALUES ('vmwareosx', 'OSX Snow Leopard (VMware)', 'osx', 'vmware', 'vmware_images', (SELECT `id` FROM `module` WHERE `name` LIKE 'os_osx'));
 INSERT IGNORE INTO `OS` (`name`, `prettyname`, `type`, `installtype`, `sourcepath`, `moduleid`) VALUES ('rhel6', 'Red Hat Enterprise 6 (Kickstart)', 'linux', 'kickstart', 'rhel6', (SELECT `id` FROM `module` WHERE `name` LIKE 'os_linux'));
 INSERT IGNORE INTO `OS` (`name`, `prettyname`, `type`, `installtype`, `sourcepath`, `moduleid`) VALUES ('rh6image', 'Red Hat Enterprise 6 (Bare Metal)', 'linux', 'partimage', 'image', (SELECT `id` FROM `module` WHERE `name` LIKE 'os_linux'));
@@ -1871,6 +1873,7 @@ INSERT IGNORE INTO `OS` (`name`, `prettyname`, `type`, `installtype`, `sourcepat
 UPDATE OS SET minram = 1024 WHERE name REGEXP 'win.*';
 UPDATE OS SET minram = 2048 WHERE name REGEXP 'win.*(7|8|10|2008|2012)';
 UPDATE OS SET minram = 1024 WHERE name REGEXP '(centos|rh|rhel)(5|6|7)';
+UPDATE OS SET minram = 4096 WHERE name REGEXP 'esxi';
 
 -- --------------------------------------------------------
 
@@ -1932,6 +1935,9 @@ INSERT IGNORE INTO `connectmethod` (`name`, `description`, `connecttext`, `servi
 INSERT IGNORE INTO `connectmethod` (`name`, `description`, `connecttext`, `servicename`, `startupscript`) VALUES
 ('iRAPP RDP', 'Remote Desktop for OS X', 'You will need to use a Remote Desktop program to connect to the system. If you did not click on the <b>Connect!</b> button from the computer you will be using to access the VCL system, you will need to return to the <strong>Current Reservations</strong> page and click the <strong>Connect!</strong> button from a web browser running on the same computer from which you will be connecting to the VCL system. Otherwise, you may be denied access to the remote computer.<br><br>\r\n\r\nUse the following information when you are ready to connect:<br>\r\n<UL>\r\n<LI><b>Remote Computer</b>: #connectIP#</LI>\r\n<LI><b>User ID</b>: #userid#</LI>\r\n<LI><b>Password</b>: #password#<br></LI>\r\n</UL>\r\n<b>NOTE</b>: The given password is for <i>this reservation only</i>. You will be given a different password for any other reservations.<br>\r\n<br>\r\nFor automatic connection, you can download an RDP file that can be opened by the Remote Desktop Connection program.<br><br>\r\n', NULL, NULL);
 
+INSERT IGNORE INTO `connectmethod` (`name`, `description`, `connecttext`, `servicename`, `startupscript`) VALUES
+('vSphere', 'VMware ESXi Host Client / vSphere', 'You can manage this nested ESXi host with the Host Client in a web browser or with a vSphere/SSH client.<br><br>\r\nUse the following information when you are ready to connect:<br>\r\n<UL>\r\n<LI><b>Remote Computer</b>: #connectIP#</LI>\r\n<LI><b>User ID</b>: #userid#</LI>\r\n<LI><b>Password</b>: #password#<br></LI>\r\n<LI><b>HTTPS</b>: https://#connectIP#/</LI>\r\n</UL>\r\n<b>NOTE</b>: The given password is for <i>this reservation only</i>. You will be given a different password for any other reservations.', '', NULL);
+
 -- --------------------------------------------------------
 
 --
@@ -1945,7 +1951,9 @@ UPDATE connectmethodport SET protocol = 'TCP' WHERE protocol = '';
 INSERT IGNORE INTO `connectmethodport` (`connectmethodid`, `port`, `protocol`) VALUES
 ((SELECT id FROM connectmethod WHERE name LIKE 'ssh'), 22, 'TCP'),
 ((SELECT id FROM connectmethod WHERE name = 'RDP'), 3389, 'TCP'),
-((SELECT id FROM connectmethod WHERE name = 'iRAPP RDP'), 3389, 'TCP');
+((SELECT id FROM connectmethod WHERE name = 'iRAPP RDP'), 3389, 'TCP'),
+((SELECT id FROM connectmethod WHERE name = 'vSphere'), 443, 'TCP'),
+((SELECT id FROM connectmethod WHERE name = 'vSphere'), 902, 'TCP');
 
 -- --------------------------------------------------------
 
@@ -1961,6 +1969,10 @@ CALL AddConnectMethodMapIfNotExists('ssh', 'linux', 0, 0, 0, 2);
 CALL AddConnectMethodMapIfNotExists('ssh', 'unix', 0, 0, 0, 2);
 CALL AddConnectMethodMapIfNotExists('RDP', 'windows', 0, 0, 0, 2);
 CALL AddConnectMethodMapIfNotExists('iRAPP RDP', 'osx', 0, 0, 0, 2);
+CALL AddConnectMethodMapIfNotExists('vSphere', 0, 'esxi4.1', 0, 0, 1);
+CALL AddConnectMethodMapIfNotExists('vSphere', 0, 'vmwareesxi', 0, 0, 1);
+CALL AddConnectMethodMapIfNotExists('vSphere', 0, 'esxi4.1', 0, 0, 2);
+CALL AddConnectMethodMapIfNotExists('vSphere', 0, 'vmwareesxi', 0, 0, 2);
 
 -- --------------------------------------------------------
 
