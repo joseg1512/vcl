@@ -413,6 +413,20 @@ sub reserve {
 	
 	notify($ERRORS{'OK'}, 0, "beginning ESXi reserve tasks");
 	
+	# ESXi nested: esperar SSH del guest tras el load (2-3 min de boot)
+	if (!$self->wait_for_ssh(600, 15)) {
+		notify($ERRORS{'WARNING'}, 0, "ESXi guest did not respond to SSH after 10 minutes");
+		return;
+	}
+
+	# esperar a que hostd responda (esxcli da 503 mientras hostd arranca)
+	for my $attempt (1 .. 24) {
+		my ($exit_status, $output) = $self->execute('esxcli network ip interface ipv4 get', 0);
+		last if defined($output) && $exit_status eq '0';
+		notify($ERRORS{'DEBUG'}, 0, "hostd not ready yet (esxcli exit $exit_status), attempt $attempt/24");
+		sleep 10;
+	}
+	
 	# Skip add_vcl_usergroup and configure_ext_sshd
 	
 	if (!VCL::Module::OS::reserve($self)) {
@@ -1424,7 +1438,12 @@ sub update_resolv_conf {
 			notify($ERRORS{'WARNING'}, 0, "failed to add DNS server $dns_server on $computer_name");
 			return;
 		}
-		elsif ($exit_status && $exit_status ne '0' && !grep(/already/i, @$output)) {
+			if ($exit_status && $exit_status ne '0' && !grep(/already|duplicate/i, @$output)) {
+				# retry una vez (IO errors esporadicos de hostd)
+				sleep 5;
+				($exit_status, $output) = $self->execute("esxcli network ip dns server add --server=$dns_server");
+			}
+			if (!defined($output) || ($exit_status && $exit_status ne '0' && !grep(/already|duplicate/i, @$output))) {
 			notify($ERRORS{'WARNING'}, 0, "failed to add DNS server $dns_server on $computer_name, output:\n" . join("\n", @$output));
 			return;
 		}
@@ -2603,8 +2622,175 @@ sub local_read_vcld_config {
 
 #//////////////////////////////////////////////////////////////////////////////
 
+sub get_os_type {
+	my $self = shift;
+	if (ref($self) !~ /VCL::Module/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	
+	my $computer_node_name = $self->data->get_computer_node_name() || return;
+	
+	my $command = 'uname -a';
+	my ($exit_status, $output) = $self->execute($command, 0);
+	if (!defined($output)) {
+		notify($ERRORS{'WARNING'}, 0, "failed to run command to determine OS type currently installed on $computer_node_name");
+		return;
+	}
+	elsif ($exit_status ne '0') {
+		notify($ERRORS{'WARNING'}, 0, "error occurred attempting to determine OS type currently installed on $computer_node_name\ncommand: '$command'\noutput:\n" . join("\n", @$output));
+		return;
+	}
+	elsif (grep(/vmkernel|esxi/i, @$output)) {
+		notify($ERRORS{'DEBUG'}, 0, "VMware ESXi (VMkernel) OS is currently installed on $computer_node_name, reporting OS type as 'linux'");
+		return 'linux';
+	}
+	else {
+		# fall back to the base implementation for anything else
+		return $self->SUPER::get_os_type();
+	}
+}
+
+sub get_private_mac_address {
+	my $self = shift;
+	if (ref($self) !~ /VCL::Module/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	
+	my $computer_node_name = $self->data->get_computer_node_name() || return;
+	my $command = "esxcli network ip interface list | grep -A20 -m1 'Name\|MTU' | grep -m1 'MAC Address' | awk '{print \$NF}'";
+	my ($exit_status, $output) = $self->execute($command, 0);
+	if (!defined($output)) {
+		notify($ERRORS{'WARNING'}, 0, "failed to execute esxcli to determine private MAC address on $computer_node_name");
+		return;
+	}
+	elsif ($exit_status ne '0' || !grep(/:/, @$output)) {
+		# fallback: obtener via esxcli network ip interface ipv4 get (mac no aparece) -> usar interfaz vmk0
+		($exit_status, $output) = $self->execute("esxcli network ip interface list | grep -m1 'MAC Address' | awk '{print \$NF}'", 0);
+		if (!defined($output) || !grep(/:/, @$output)) {
+			notify($ERRORS{'WARNING'}, 0, "unable to determine private MAC address on $computer_node_name");
+			return;
+		}
+	}
+	my $mac_address = $output->[0];
+	chomp $mac_address;
+	notify($ERRORS{'DEBUG'}, 0, "retrieved private MAC address on $computer_node_name: $mac_address");
+	return lc($mac_address);
+}
+
+sub get_public_mac_address {
+	my $self = shift;
+	return $self->get_private_mac_address();
+}
+
+
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 get_public_interface_name
+
+ Parameters  : none
+ Returns     : string
+ Description : ESXi nested uses a single VMkernel NIC (vmk0) for both private
+               and public traffic (same LAN). The base OS.pm logic rejects an
+               interface whose only IP equals the private IP, so override to
+               return the private interface name.
+
+=cut
+
+sub get_public_interface_name {
+	my $self = shift;
+	if (ref($self) !~ /VCL::Module/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+
+	my $private_interface_name = $self->get_private_interface_name();
+	if (!$private_interface_name) {
+		notify($ERRORS{'WARNING'}, 0, "unable to determine public interface name, private interface name could not be determined");
+		return;
+	}
+
+	notify($ERRORS{'DEBUG'}, 0, "ESXi nested: public and private interface are the same ($private_interface_name)");
+	return $private_interface_name;
+}
+
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 get_default_gateway
+
+ Parameters  : none
+ Returns     : string
+ Description : ESXi nested: la ruta default ya esta configurada en el guest
+               (vmk0 -> 192.168.0.1). El OS.pm base depende de la key
+               'default_gateway' del network config, que puede faltar si
+               esxcli route list falla intermitentemente. Devuelve el gateway
+               del management node directamente.
+
+=cut
+
+
+sub get_default_gateway {
+	my $self = shift;
+	if (ref($self) !~ /VCL::Module/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+
+	my $gateway = $self->get_correct_default_gateway();
+	if (!$gateway) {
+		notify($ERRORS{'WARNING'}, 0, "unable to determine default gateway");
+		return;
+	}
+
+	notify($ERRORS{'DEBUG'}, 0, "ESXi nested: returning management node default gateway: $gateway");
+	return $gateway;
+}
+
 1;
 __END__
+
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 get_os_type
+
+ Parameters  : none
+ Returns     : string
+ Description : Returns the OS type of the guest. ESXi 'uname -a' reports
+               'VMkernel ... ESXi' which the base OS.pm::get_os_type() does
+               not recognize (no 'linux'/'win' substring). The OS table row
+               'vmwareesxi' has type 'linux', so return 'linux' for ESXi
+               guests so that libvirt.pm::get_active_domain_name() works.
+
+=cut
+
+
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 get_private_mac_address
+
+ Parameters  : none
+ Returns     : string
+ Description : Returns the MAC address of the first VMkernel NIC (esxcli).
+
+=cut
+
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 get_public_mac_address
+
+ Parameters  : none
+ Returns     : string
+ Description : ESXi nested suele tener un solo VMkernel NIC (vmk0) para todo.
+               Devuelve la misma MAC que private.
+
+=cut
+
 
 =head1 SEE ALSO
 

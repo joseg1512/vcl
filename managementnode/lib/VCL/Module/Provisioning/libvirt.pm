@@ -248,6 +248,12 @@ Construct the default libvirt XML definition for the domain.
 		return;
 	}
 
+	# Call the driver's extend_domain_xml if implemented (nested ESXi CPU fix)
+			notify($ERRORS{"DEBUG"}, 0, "EXTEND_HOOK: driver=" . ref($self->driver) . " os=" . ($self->data->get_image_os_name() || "undef"));
+	if ($self->driver && $self->driver->can('extend_domain_xml')) {
+		$domain_xml_definition = $self->driver->extend_domain_xml($domain_xml_definition);
+	}
+
 =item *
 
 Call the libvirt driver module's 'extend_domain_xml' subroutine if it is
@@ -1856,9 +1862,9 @@ EOF
 		'type' => $domain_type,
 		'description' => [$description],
 		'name' => [$domain_name],
-		'on_poweroff' => ['preserve'],
+		'on_poweroff' => ['destroy'],
 		'on_reboot' => ['restart'],
-		'on_crash' => ['preserve'],
+		'on_crash' => ['destroy'],
 		'os' => [
 			{
 				'type' => {
