@@ -1305,9 +1305,12 @@ function doQuery($query, $errcode=101, $db="vcl", $nolog=0) {
 			   .        "NOW(), "
 			   .        "?, " # $mode
 			   .        "?)"; # $logquery
-			$s = mysqli_prepare($mysqli_link_vcl, $q);
-			mysqli_stmt_bind_param($s, 'iss', $id, $mode, $query);
-			mysqli_stmt_execute($s);
+			# parche FK-safe: skip querylog si userid no existe en la tabla user
+			if($id) {
+				$s = mysqli_prepare($mysqli_link_vcl, $q);
+				mysqli_stmt_bind_param($s, 'iss', $id, $mode, $query);
+				mysqli_stmt_execute($s);
+			}
 		}
 		for($i = 0; ! ($qh = mysqli_query($mysqli_link_vcl, $query)) && $i < 3; $i++) {
 			if(mysqli_errno($mysqli_link_vcl) == '1213') # DEADLOCK, sleep and retry
