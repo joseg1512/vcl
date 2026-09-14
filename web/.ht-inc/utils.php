@@ -1,4 +1,12 @@
 <?php
+// PHP 8 polyfill: get_magic_quotes_gpc() removed in PHP 8
+if(!function_exists('get_magic_quotes_gpc')) {
+	function get_magic_quotes_gpc() {
+		return 0;
+	}
+}
+
+
 /*
   Licensed to the Apache Software Foundation (ASF) under one or more
   contributor license agreements.  See the NOTICE file distributed with
