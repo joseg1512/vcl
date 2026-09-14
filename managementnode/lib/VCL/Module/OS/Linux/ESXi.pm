@@ -2622,6 +2622,22 @@ sub local_read_vcld_config {
 
 #//////////////////////////////////////////////////////////////////////////////
 
+sub execute {
+	my $self = shift;
+	
+	# retry hostd: esxcli/vim-cmd pueden fallar con 503/Connection refused
+	# mientras hostd arranca tras un load/reload del guest ESXi
+	my ($exit_status, $output);
+	for my $attempt (1 .. 3) {
+		($exit_status, $output) = $self->SUPER::execute(@_);
+		last if !defined($output);
+		last if !grep(/(503 Service Unavailable|Connection refused)/, @$output);
+		notify($ERRORS{'DEBUG'}, 0, "hostd not ready (attempt $attempt/3), retrying in 10s");
+		sleep 10;
+	}
+	return ($exit_status, $output);
+}
+
 sub get_os_type {
 	my $self = shift;
 	if (ref($self) !~ /VCL::Module/i) {
