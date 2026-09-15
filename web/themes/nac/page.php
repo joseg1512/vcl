@@ -28,7 +28,7 @@
 ///
 ////////////////////////////////////////////////////////////////////////////////
 function getHeader($refresh) {
-	global $user, $mode, $authed, $viewmode, $locale, $VCLversion;
+	global $user, $mode, $authed, $locale, $VCLversion;
 	$v = $VCLversion;
 
 	$rt  = "<!DOCTYPE html>\n";
@@ -40,20 +40,20 @@ function getHeader($refresh) {
 		$usenls = 1;
 		$usenlsstr = "true";
 	}
-	$rt .= "<link rel=\"shortcut icon\" href=\"images/favicon.ico\" type=\"image/x-icon\" />\n";
+	$rt .= "<link rel=\"shortcut icon\" href=\"themes/nac/images/favicon.svg\" type=\"image/svg+xml\" />\n";
 	$rt .= "<link href=\"css/vcl.css\" rel=\"stylesheet\" type=\"text/css\" />\n";
 
 	$rt .= "<meta charset=\"UTF-8\">\n";
 	$rt .= "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n";
-	$rt .= "<title>" . i('VCL: The Virtual Computing Lab') . "</title>\n";
+	$rt .= "<title>" . i('NAC: Nube Académica Computacional') . "</title>\n";
 	$rt .= "<meta name='robots' content='noindex,follow' />\n";
 
 	$rt .= "<link href=\"https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css\" rel=\"stylesheet\" integrity=\"sha384-BVYiiSIFeK1dGmJRAkycuHAHRg32OmUcww7on3RYdg4Va+PmSTsz/K68vbdEjh4u\" crossorigin=\"anonymous\" media=\"all\" />\n";
 
 	$rt .= "<script src=\"https://ajax.googleapis.com/ajax/libs/jquery/1.12.4/jquery.min.js\" integrity=\"sha512-jGsMH83oKe9asCpkOVkBnUrDDTp8wl+adkB2D+//JtlxO4SrLoJdhbOysIFQJloQFD+C4Fl1rMsQZF76JjV0eQ==\" crossorigin=\"anonymous\"></script>\n";
 
-	$rt .= "<link href=\"themes/dropdownmenus/css/theme.css\" rel=\"stylesheet\" type=\"text/css\" />\n";
-	$rt .= "<script src=\"themes/dropdownmenus/js/topnav.js\" type=\"text/javascript\"></script>\n";
+	$rt .= "<link href=\"themes/nac/css/theme.css\" rel=\"stylesheet\" type=\"text/css\" />\n";
+	$rt .= "<script src=\"themes/nac/js/topnav.js\" type=\"text/javascript\"></script>\n";
 	$rt .= "<script src=\"js/code.js?v=$v\" type=\"text/javascript\"></script>\n";
 	if($usenls)
 		$rt .= "<script type=\"text/javascript\" src=\"js/nls/$locale/messages.js?v=$v\"></script>\n";
@@ -69,18 +69,19 @@ function getHeader($refresh) {
 		$rt .= "<link rel=stylesheet type=\"text/css\" href=\"css/$file\">\n";
 
 	$rt .= "</head>\n";
-	$rt .= "<body class=\"dropdownmenus\">\n";
+	$rt .= "<body class=\"nac\">\n";
 	$rt .= "<div id=\"wrapperdiv\" class=\"container-fluid\">\n";
 	$rt .= "<header id=\"siteheader\" role=\"banner\">\n";
 	if($authed) {
 		$rt .= "  <div id=\"loggedinidbox\">\n";
-		$rt .= "    {$user['unityid']}@{$user['affiliation']}\n";
+		$rt .= "    " . htmlspecialchars($user['unityid'] . '@' . $user['affiliation'], ENT_QUOTES) . "\n";
 		$rt .= "  </div>\n";
 	}
 	$rt .= "  <div class=\"container\">\n";
-	$rt .= "    <img src=\"themes/dropdownmenus/images/vcllogo.png\" class=\"header-logo\" />\n";
+	$rt .= "    <img src=\"themes/nac/images/nac-logo.svg\" class=\"header-logo\" alt=\"" . i('NAC') . "\" />\n";
 	$rt .= "    <h1 class=\"site-title\">\n";
-	$rt .= "      <span>" . i('Virtual Computing Lab') . "</span><br />\n";
+	$rt .= "      <span>" . i('Nube Académica Computacional') . "</span><br />\n";
+	$rt .= "      <small>" . i('Universidad de Costa Rica') . "</small>\n";
 	$rt .= "    </h1>\n";
 	$rt .= "  </div><!-- .container -->\n";
 	$rt .= "  <div class=\"container-fluid\">\n";
@@ -112,7 +113,7 @@ function getHeader($refresh) {
 
 		if($menu['reservations']['selected'])
 			$rt .= "              <li class=\"active\"><a href=\"{$menu['reservations']['url']}\">{$menu['reservations']['title']}</a></li>\n";
-		else 
+		else
 			$rt .= "              <li><a href=\"{$menu['reservations']['url']}\">{$menu['reservations']['title']}</a></li>\n";
 		$rt .= "              <li><a href=\"#\" class=\"dropdown-toggle\" data-toggle=\"dropdown\" data-target=\"#\">" . i('Manage') . "<b class=\"caret\"></b></a>\n";
 		$rt .= "                <ul class=\"dropdown-menu\">\n";
@@ -141,13 +142,6 @@ function getHeader($refresh) {
 		$rt .= "              </li>\n";
 		$rt .= "              <li><a href=\"{$menu['codeDocumentation']['url']}\">{$menu['codeDocumentation']['title']}</a></li>\n";
 	}
-	# example help menu
-	/*$rt .= "               <li><a href=\"#\" data-toggle=\"dropdown\">" . i(Help & Documentation) . "<b class=\"caret\"></b></a>\n";
-	$rt .= "<ul class=\"dropdown-menu\">\n";
-	$rt .= "	<li><a href=\"https://example.edu/\">" . i('Help Item 1') . "</a></li>\n";
-	$rt .= "	<li><a href=\"https://example.edu\">" . i('Help Item 2') . "</a></li>\n";
-	$rt .= "</ul>\n";
-	$rt .= "</li>\n";*/
 
 	if($mode != 'inmaintenance') {
 		$langitems = getThemeLanguageMenuItems();
@@ -182,7 +176,7 @@ function getHeader($refresh) {
 
 ////////////////////////////////////////////////////////////////////////////////
 ///
-/// \fn sortMenuList($menu)
+/// \fn sortMenuList($a, $b)
 ///
 /// \param $a - first item
 /// \param $b - second item
@@ -190,7 +184,7 @@ function getHeader($refresh) {
 /// \return -1 if $a['title'] < $b['title'], 0 if $a['title'] == $b['title'],
 /// 1 if $a['title'] > $b['title']
 ///
-/// \brief 
+/// \brief sorts navigation menu items by title
 ///
 ////////////////////////////////////////////////////////////////////////////////
 function sortMenuList($a, $b) {
@@ -207,8 +201,6 @@ function sortMenuList($a, $b) {
 ///
 ////////////////////////////////////////////////////////////////////////////////
 function getFooter() {
-	global $totalQueries, $queryTimes, $debug, $totalQueryTime, $startload, $mode;
-
 	$rt = "";
 	$rt .= "</div><!-- #content -->\n";
 	$rt .= "  </main><!-- #main -->\n";
@@ -216,26 +208,14 @@ function getFooter() {
 	$rt .= "    <footer role=\"contentinfo\">\n";
 	$rt .= "      <div class=\"row\">\n";
 	$rt .= "        <div class=\"site-info\">\n";
+	$rt .= i('Nube Académica Computacional') . " &#183; " . i('Universidad de Costa Rica') . "<br />\n";
 	$rt .= "          Copyright &copy; " . date('Y') . " &#183; ";
-	$rt .= "<img src=\"themes/dropdownmenus/images/feather_tiny.png\">";
-	$rt .= "<a href=\"http://vcl.apache.org\">Apache Software Foundation</a>";
-	# footer links
-	#$rt .= " &#183; <a href=\"http://example.edu/\">Some link</a>\n";
+	$rt .= "<img src=\"themes/nac/images/feather_tiny.png\" alt=\"\">";
+	$rt .= "<a href=\"https://vcl.apache.org\">Apache Software Foundation</a>";
 	$rt .= "        </div><!-- .site-info -->\n";
 	$rt .= "      </div><!-- .row -->\n";
 	$rt .= "    </footer>\n";
 	$rt .= "  </div><!-- .container-fluid -->\n";
-	# below footer - useful for entity name and address, etc
-	#$rt .= "  <div class=\"sub-footer\">\n";
-	#$rt .= "    <div class=\"container\">\n";
-	#$rt .= "      <h4><a href=\"http://www.example.edu/\"><strong>My University</strong></a></h4>\n";
-	#$rt .= "      <address>\n";
-	#$rt .= "        <span><strong>Title</strong></span>\n";
-	#$rt .= "        <span>Address</span>\n";
-	#$rt .= "        <span>Phone#</span>\n";
-	#$rt .= "      </address>\n";
-	#$rt .= "    </div><!-- .container -->\n";
-	#$rt .= "  </div><!-- .sub-footer -->\n";
 	$rt .= "</div><!-- #wrapperdiv -->\n";
 	$rt .= "<script src=\"https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js\" integrity=\"sha384-Tc5IQib027qvyjSMfHjOMaLkfuWVxZxUPnCJA7l2mCWNIpG9mGCD8wGNIcPD7Txa\" crossorigin=\"anonymous\"></script>\n";
 	$rt .= "</body>\n";

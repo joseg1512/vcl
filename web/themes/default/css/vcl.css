@@ -261,7 +261,7 @@ form {
 	padding: 4px 0 0 4px;
 }
 
-#menulist ul li a:visted {
+#menulist ul li a:visited {
 	display: block;
 	background: none;
 	font: 12px arial, helvetica, sans-serif;		
@@ -271,7 +271,8 @@ form {
 	color: black;
 }
 
-#menulist ul li a:hover, a:active {
+#menulist ul li a:hover,
+#menulist ul li a:active {
 	text-decoration: none;
 	color: #0051f8;
 }
@@ -298,7 +299,7 @@ form {
 	padding: 4px 0 0 4px;
 }
 
-#menulist ul li.selected a:visted {
+#menulist ul li.selected a:visited {
 	display: block;
 	background: none;
 	font: 12px arial, helvetica, sans-serif;	
@@ -308,7 +309,8 @@ form {
 	color: white;
 }
 
-#menulist ul li.selected a:hover, a:active {
+#menulist ul li.selected a:hover,
+#menulist ul li.selected a:active {
 	text-decoration: none;
 	color: black;
 }	

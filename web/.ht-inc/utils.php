@@ -208,23 +208,16 @@ function initGlobals() {
 	if(! $authed) {
 		# set $skin based on cookie (so it gets set before user logs in
 		#   later, we set it by affiliation (helps with 'view as user')
-		if(array_key_exists('VCLSKIN', $_COOKIE)) {
-			switch($_COOKIE['VCLSKIN']) {
-				case 'EXAMPLE2':
-					$skin = 'example2';
-					break;
-				default:
-					$skin = getAffiliationTheme(0);
-					break;
-			}
-		}
+		$skin = '';
+		if(array_key_exists('VCLSKIN', $_COOKIE))
+			$skin = resolveVCLTheme($_COOKIE['VCLSKIN']);
 		# set skin based on IP address, useful to ensure anyone coming
 		#   from a certain organization automatically gets a different skin
 		/*elseif(preg_match('/^152\.9\./', $_SERVER['REMOTE_ADDR']) ||
 			(array_key_exists('VCLSKIN', $_COOKIE) && $_COOKIE['VCLSKIN'] == 'EXAMPLE1')) {
 			$skin = 'example1';
 		}*/
-		else
+		if($skin == '')
 			$skin = getAffiliationTheme(0);
 		if($mode != 'selectauth' && $mode != 'submitLogin')
 			require_once("themes/$skin/page.php");
@@ -800,8 +793,8 @@ function maintenanceCheck() {
 					else
 						$inmaintenance = 1;
 				}
-				elseif(preg_match("/^THEME=([-A-Za-z0-9@#_:;,\.])+$/", $line, $matches)) {
-					$skin = $matches[1];
+				elseif(preg_match("/^THEME=([-A-Za-z0-9_]+)$/", $line, $matches)) {
+					$skin = resolveVCLTheme($matches[1]);
 				}
 				else
 					$msg .= $line;
@@ -815,22 +808,20 @@ function maintenanceCheck() {
 		$authed = 0;
 		$mode = 'inmaintenance';
 		$user = array();
-		if(array_key_exists('VCLSKIN', $_COOKIE))
-			$skin = strtolower($_COOKIE['VCLSKIN']);
-		if($skin != '') {
-			$allskins = array();
-			foreach(glob('themes/*') as $item) {
-				if(! is_dir($item))
-					continue;
-				$tmp = explode('/', $item);
-				$item = array_pop($tmp);
-				$allskins[$item] = 1;
-			}
-			if(! array_key_exists($skin, $allskins))
+		if(array_key_exists('VCLSKIN', $_COOKIE)) {
+			$fromcookie = resolveVCLTheme($_COOKIE['VCLSKIN']);
+			if($fromcookie !== '')
+				$skin = $fromcookie;
+		}
+		if($skin == '')
+			$skin = DEFAULTTHEME;
+		else {
+			$resolved = resolveVCLTheme($skin);
+			if($resolved !== '')
+				$skin = $resolved;
+			else
 				$skin = DEFAULTTHEME;
 		}
-		else
-			$skin = DEFAULTTHEME;
 		setVCLLocale();
 		require_once("themes/$skin/page.php");
 		printHTMLHeader();
@@ -4033,6 +4024,49 @@ function getAffiliationDataUpdateText($affilid=0) {
 
 ////////////////////////////////////////////////////////////////////////////////
 ///
+/// \fn getAvailableThemes()
+///
+/// \return array of installed theme directory names, keyed by name
+///
+/// \brief lists selectable skins under web/themes/
+///
+////////////////////////////////////////////////////////////////////////////////
+function getAvailableThemes() {
+	$themes = array();
+	foreach(glob('themes/*') as $item) {
+		if(! is_dir($item))
+			continue;
+		$name = basename($item);
+		$themes[$name] = $name;
+	}
+	return $themes;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+///
+/// \fn resolveVCLTheme($name)
+///
+/// \param $name - theme name, possibly from a cookie or database
+///
+/// \return lowercase theme directory name if it exists, otherwise ''
+///
+/// \brief validates $name against installed theme directories
+///
+////////////////////////////////////////////////////////////////////////////////
+function resolveVCLTheme($name) {
+	if(! is_string($name) || $name === '')
+		return '';
+	$name = strtolower($name);
+	if(! preg_match('/^[a-z0-9_-]+$/', $name))
+		return '';
+	$themes = getAvailableThemes();
+	if(array_key_exists($name, $themes))
+		return $name;
+	return '';
+}
+
+////////////////////////////////////////////////////////////////////////////////
+///
 /// \fn getAffiliationTheme($affilid)
 ///
 /// \param $affilid - id of an affiliation, or 0 to get theme for Global
@@ -4054,10 +4088,13 @@ function getAffiliationTheme($affilid) {
 	  	       .       "a2.name = 'Global'";
 	}
 	$qh = doQuery($query);
+	$theme = DEFAULTTHEME;
 	if(($row = mysqli_fetch_assoc($qh)) && ! empty($row['theme']))
-		return $row['theme'];
-	else
-		return DEFAULTTHEME;
+		$theme = $row['theme'];
+	$resolved = resolveVCLTheme($theme);
+	if($resolved !== '')
+		return $resolved;
+	return DEFAULTTHEME;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -14550,6 +14587,66 @@ function setVCLLocale() {
 	bindtextdomain('vcl', './locale');
 	textdomain('vcl');
 	bind_textdomain_codeset('vcl', 'UTF-8');
+}
+
+////////////////////////////////////////////////////////////////////////////////
+///
+/// \fn getThemeLanguageMenuItems()
+///
+/// \return array of language menu items, each with keys:\n
+/// \b url - URL that switches locale\n
+/// \b label - display name of the language\n
+/// \b selected - 1 if this is the current locale, 0 otherwise
+///
+/// \brief builds language links for theme navigation (desktop form still uses
+/// getSelectLanguagePulldown). Unauthenticated items must use mode=changeLocale
+/// rather than a continuation id, matching getSelectLanguagePulldown().
+///
+////////////////////////////////////////////////////////////////////////////////
+function getThemeLanguageMenuItems() {
+	global $locale, $remoteIP, $mode, $authMechs, $authed;
+	$locales = getFSlocales();
+	$items = array();
+	if(count($locales) < 1)
+		return $items;
+
+	if($authed) {
+		$cdata = array('IP' => $remoteIP, 'oldmode' => $mode);
+		if($mode == 'selectauth') {
+			$type = processInputVar('authtype', ARG_STRING);
+			if(! empty($type) && array_key_exists($type, $authMechs))
+				$cdata['authtype'] = $type;
+		}
+		foreach($locales as $dir => $lang) {
+			$cdata['locale'] = $dir;
+			$tmp = explode('/', $dir);
+			$testlocale = array_pop($tmp);
+			$cont = addContinuationsEntry('changeLocale', $cdata, 86400);
+			$items[] = array(
+				'url' => BASEURL . SCRIPT . "?continuation=" . rawurlencode($cont),
+				'label' => $lang,
+				'selected' => ($locale == $testlocale) ? 1 : 0,
+			);
+		}
+	}
+	else {
+		foreach($locales as $dir => $lang) {
+			$tmp = explode('/', $dir);
+			$testlocale = array_pop($tmp);
+			$url = BASEURL . SCRIPT . "?mode=changeLocale&locale=" . rawurlencode($dir);
+			if($mode == 'selectauth') {
+				$type = processInputVar('authtype', ARG_STRING);
+				if(! empty($type) && array_key_exists($type, $authMechs))
+					$url .= "&authtype=" . rawurlencode($type) . "&oldmode=selectauth";
+			}
+			$items[] = array(
+				'url' => $url,
+				'label' => $lang,
+				'selected' => ($locale == $testlocale) ? 1 : 0,
+			);
+		}
+	}
+	return $items;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
