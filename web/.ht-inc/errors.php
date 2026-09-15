@@ -21,7 +21,7 @@
  */
 
 // set the error reporting level for this script
-error_reporting(E_ALL);
+error_reporting(E_ALL & ~E_DEPRECATED);
 
 # 100 - 399: MySQL errors
 /// array containing all the errors to be reported

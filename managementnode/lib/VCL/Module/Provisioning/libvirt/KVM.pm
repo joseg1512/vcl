@@ -705,7 +705,7 @@ sub create_copy_on_write_image {
 	}
 	
 	notify($ERRORS{'DEBUG'}, 0, "creating copy on write image on $node_name\nmaster disk image: $master_image_file_path\ncopy on write image: $copy_on_write_file_path\nformat: $disk_format");
-	my $command = "qemu-img create -f $disk_format -b \"$master_image_file_path\" \"$copy_on_write_file_path\"";
+	my $command = "qemu-img create -f $disk_format -F $disk_format -b \"$master_image_file_path\" \"$copy_on_write_file_path\"";
 	my ($exit_status, $output) = $self->vmhost_os->execute($command);
 	if (!defined($exit_status)) {
 		notify($ERRORS{'WARNING'}, 0, "failed to execute command to create copy on write image on $node_name: '$command'");
@@ -1048,6 +1048,45 @@ sub query_windows_image_registry {
 }
 
 #//////////////////////////////////////////////////////////////////////////////
+
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 extend_domain_xml
+
+ Parameters  : $domain_xml_definition (string)
+ Returns     : string
+ Description : ESXi guests need nested virtualization (VT-x/VMX exposed).
+               The default XML uses cpu mode=custom without VMX, which makes
+               the nested VMkernel panic. Switch CPU to host-passthrough.
+
+=cut
+
+sub extend_domain_xml {
+	my $self = shift;
+	my $domain_xml = shift;
+
+	return $domain_xml unless ref($self) =~ /VCL::Module/i;
+
+	my $image_os_name = $self->data->get_image_os_name() || '';
+	my $computer_node_name = $self->data->get_computer_node_name() || '';
+
+	if ($image_os_name =~ /esxi/i) {
+		open(my $fh, ">", "/tmp/extend-input.txt"); print $fh $domain_xml; close $fh;
+		if ($domain_xml =~ /<cpu mode=.host-model.>/ || $domain_xml =~ /mode=.custom/) {
+			$domain_xml =~ s|<cpu mode=.host-model.>.*?</cpu>|<cpu mode="host-passthrough"></cpu>|s;
+			notify($ERRORS{'OK'}, 0, "modified CPU mode to host-passthrough for nested ESXi guest $computer_node_name");
+			# ESXi nested: clock/timers como en el domain original (evita PSOD VmPowerSetCheckup)
+			$domain_xml =~ s|<clock offset=.utc. />|<clock offset='localtime'><timer name='rtc' tickpolicy='catchup'/><timer name='pit' tickpolicy='delay'/><timer name='hpet' present='no'/><timer name='hypervclock' present='yes'/></clock>|;
+			notify($ERRORS{'OK'}, 0, "added ESXi clock/timers to $computer_node_name domain");
+			# ESXi 8: sin driver rtl8139, reescribir NIC a vmxnet3
+			$domain_xml =~ s/<model type=.rtl8139. \/>/<model type='vmxnet3' \/>/g;
+			notify($ERRORS{'OK'}, 0, "rewrote NIC model rtl8139 to vmxnet3 for ESXi guest $computer_node_name");
+		}
+	}
+
+	return $domain_xml;
+}
 
 1;
 __END__
