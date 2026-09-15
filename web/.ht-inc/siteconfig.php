@@ -1735,14 +1735,7 @@ class AffilTheme extends AffilTextVariable {
 	///
 	/////////////////////////////////////////////////////////////////////////////
 	function getValidValues() {
-		$this->constraints = array();
-		foreach(glob('themes/*') as $item) {
-			if(! is_dir($item))
-				continue;
-			$tmp = explode('/', $item);
-			$item = $tmp[1];
-			$this->constraints[$item] = $item;
-		}
+		$this->constraints = getAvailableThemes();
 	}
 
 	/////////////////////////////////////////////////////////////////////////////

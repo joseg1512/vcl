@@ -90,7 +90,7 @@ define("FILTERINGSELECTTHRESHOLD", 1000); // if USEFILTERINGSELECT = 1, only use
 
 define("SEMTIMEOUT", "45");
 
-define("DEFAULTTHEME", 'default'); // this is the theme that will be used for the login screen and when the site is placed in maintenance if $_COOKIE['VCLSKIN'] is not set
+define("DEFAULTTHEME", 'default'); // login/maintenance theme if $_COOKIE['VCLSKIN'] is not set. Installed themes live in web/themes/ (default, dropdownmenus, nac). Per-affiliation theme is Site Configuration → Site Theme. For the NAC/UCR theme see web/themes/nac/README.md.
 define("HELPFAQURL", "http://vcl.example.org/help-faq/");
 
 define("ALLOWADDSHIBUSERS", 0); // this is only related to using Shibboleth authentication for an affiliation that does not

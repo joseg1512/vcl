@@ -26,9 +26,7 @@ if [[ -z $1 ]]; then
 fi
 
 skin=$1
-pwd=`pwd`
-
-path=`dirname $pwd/$0`
+path="$(cd "$(dirname "$0")" && pwd)"
 
 if [[ ! -d $path/../dojo/dijit/themes/tundra ]]; then
 	echo "could not find dojo's tundra theme at $path/../dojo/dijit/themes/tundra"
