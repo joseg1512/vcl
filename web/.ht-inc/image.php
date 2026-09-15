@@ -400,6 +400,27 @@ class Image extends Resource {
 		$extra = array('smallDelta' => 1, 'largeDelta' => 2);
 		$h .= labeledFormItem('cores', i('Required Cores'), 'spinner', '{min:1, max:255}',
 		                      1, 2, '', '', $extra);
+		# additional disks
+		$h .= "<div class=\"boxedoptions\" id=\"imageaddiskbox\">\n";
+		$extra = array('onChange' => 'toggleAdditionalDisks();');
+		$h .= labeledFormItem('additionaldisksenable', i('Additional disks'), 'check', '', '', '', '', '', $extra, '', helpIcon('adddiskhelp'));
+		$h .= "<div id=\"additionaldisksrows\" class=\"hidden\">\n";
+		$extra = array('smallDelta' => 10, 'largeDelta' => 50);
+		for($i = 1; $i <= 10; $i++) {
+			$rowclass = ($i == 1) ? 'adddiskrow' : 'adddiskrow hidden';
+			$h .= "<div id=\"adddiskrow$i\" class=\"$rowclass\">\n";
+			$h .= labeledFormItem("adddisksize$i", i('Disk') . " $i (GB)", 'spinner',
+			                      '{min:1, max:4096, places:0}', 1, 100, '', '', $extra);
+			$h .= "</div>\n";
+		}
+		$h .= "<div id=\"adddiskbtns\">\n";
+		$h .= "<button type=\"button\" id=\"adddiskaddbtn\" onclick=\"addAdditionalDiskRow();\">";
+		$h .= i('Add disk') . "</button>\n";
+		$h .= "<button type=\"button\" id=\"adddiskremovebtn\" onclick=\"removeAdditionalDiskRow();\">";
+		$h .= i('Remove disk') . "</button>\n";
+		$h .= "</div>\n";
+		$h .= "</div>\n"; # additionaldisksrows
+		$h .= "</div>\n"; # boxedoptions
 		# proc speed
 		$extra = array('smallDelta' => 500, 'largeDelta' => 8000);
 		$h .= labeledFormItem('cpuspeed', i('Processor Speed'), 'spinner', '{min:500, max:8000}',
@@ -528,6 +549,7 @@ class Image extends Resource {
 		$h .= "</div>\n"; # autoconfirmdlg
 
 		$h .= helpTooltip('baseouhelp', i('OU where nodes deployed with this image will be registered. Do not enter the domain component (ex OU=Computers,OU=VCL)'));
+		$h .= helpTooltip('adddiskhelp', i('If checked, empty disks are attached when the image is loaded. They are not stored in the captured image and are recreated empty on each load or reload.'));
 		return $h;
 	}
 
@@ -738,6 +760,8 @@ class Image extends Resource {
 		$cont = addContinuationsEntry('connectmethodDialogContent', $cdata2);
 		$data['connectmethodurl'] = BASEURL . SCRIPT . "?continuation=$cont";
 		$data['connectmethods'] = array_values($data['connectmethods']);
+		# additional disks (query live; getImages may be cached for this PHP process)
+		$data['additionaldisks'] = $this->getAdditionalDisks($imageid);
 		# save continuation
 		$cont = addContinuationsEntry('AJsaveResource', $cdata);
 
@@ -903,6 +927,10 @@ class Image extends Resource {
 			}
 		  checkClearImageMeta($olddata['imagemetaid'], $data['imageid']);
 		}
+
+		# additional disks (checkbox off = delete all rows)
+		$this->saveAdditionalDisks($data['imageid'], $data['additionaldisks']);
+
 		$args = $this->defaultGetDataArgs;
 		$args['rscid'] = $data['imageid'];
 		$tmp = $this->getData($args);
@@ -1369,6 +1397,8 @@ class Image extends Resource {
 			$virtual = 1;
 	
 		$this->addImagePermissions($ownerdata, $resourceid, $virtual);
+
+		$this->saveAdditionalDisks($imageid, isset($data['additionaldisks']) ? $data['additionaldisks'] : array());
 	
 		return $imageid;
 	}
@@ -1655,6 +1685,8 @@ class Image extends Resource {
 		$return["adauthenabled"] = processInputVar("adauthenabled", ARG_NUMERIC, 0);
 		$return["addomainid"] = processInputVar("addomainid", ARG_NUMERIC);
 		$return["baseou"] = processInputVar("baseou", ARG_STRING, '');
+		$return["additionaldisksenabled"] = processInputVar("additionaldisksenabled", ARG_NUMERIC, 0);
+		$return["adddisksizes"] = processInputVar("adddisksizes", ARG_STRING, '');
 
 		$return['requestid'] = getContinuationVar('requestid'); # only in add
 		$return["imageid"] = getContinuationVar('imageid');
@@ -1792,6 +1824,32 @@ class Image extends Resource {
 			$return['addomainid'] = 0;
 			$return['baseou'] = NULL;
 		}
+		$return['additionaldisks'] = array();
+		if($return['additionaldisksenabled'] != 0 && $return['additionaldisksenabled'] != 1)
+			$return['additionaldisksenabled'] = 0;
+		if($return['additionaldisksenabled'] == 1) {
+			$sizes = array();
+			foreach(explode(',', $return['adddisksizes']) as $sizegb) {
+				$sizegb = trim($sizegb);
+				if($sizegb === '')
+					continue;
+				$sizes[] = $sizegb;
+			}
+			if(count($sizes) < 1 || count($sizes) > 10) {
+				$return['error'] = 1;
+				$errormsg[] = i("Additional disks must include between 1 and 10 disks");
+			}
+			else {
+				foreach($sizes as $sizegb) {
+					if(! preg_match('/^[0-9]+$/', $sizegb) || $sizegb < 1 || $sizegb > 65535) {
+						$return['error'] = 1;
+						$errormsg[] = i("Each additional disk size must be an integer between 1 and 65535 GB");
+						break;
+					}
+					$return['additionaldisks'][] = (int)$sizegb;
+				}
+			}
+		}
 		if(empty($return['desc'])) {
 			$return['error'] = 1;
 			$errormsg[] = i("You must include a description of the image") . "<br>";
@@ -1819,6 +1877,75 @@ class Image extends Resource {
 		if($return['error'])
 			$return['errormsg'] = implode('<br>', $errormsg);
 		return $return;
+	}
+
+	/////////////////////////////////////////////////////////////////////////////
+	///
+	/// \fn getAdditionalDisks($imageid)
+	///
+	/// \param $imageid - id of an image
+	///
+	/// \return array of disks, each with sequence and sizegb
+	///
+	/// \brief loads additional disk rows for an image, ordered by sequence
+	///
+	/////////////////////////////////////////////////////////////////////////////
+	function getAdditionalDisks($imageid) {
+		$disks = array();
+		$imageid = (int)$imageid;
+		if($imageid < 1)
+			return $disks;
+		$query = "SELECT sequence, "
+		       .        "sizegb "
+		       . "FROM imageadditionaldisk "
+		       . "WHERE imageid = $imageid "
+		       . "ORDER BY sequence";
+		$qh = doQuery($query);
+		while($row = mysqli_fetch_assoc($qh)) {
+			$disks[] = array('sequence' => (int)$row['sequence'],
+			                 'sizegb' => (int)$row['sizegb']);
+		}
+		return $disks;
+	}
+
+	/////////////////////////////////////////////////////////////////////////////
+	///
+	/// \fn saveAdditionalDisks($imageid, $sizes)
+	///
+	/// \param $imageid - id of an image
+	/// \param $sizes - array of disk sizes in GB, in sequence order; empty
+	/// deletes all rows
+	///
+	/// \brief replaces additional disk rows for an image
+	///
+	/////////////////////////////////////////////////////////////////////////////
+	function saveAdditionalDisks($imageid, $sizes) {
+		$imageid = (int)$imageid;
+		if($imageid < 1)
+			return;
+		$query = "DELETE FROM imageadditionaldisk "
+		       . "WHERE imageid = $imageid";
+		doQuery($query);
+		if(! is_array($sizes) || ! count($sizes))
+			return;
+		$seq = 1;
+		foreach($sizes as $sizegb) {
+			if($seq > 10)
+				break;
+			$sizegb = (int)$sizegb;
+			if($sizegb < 1)
+				continue;
+			$query = "INSERT INTO imageadditionaldisk "
+			       .        "(imageid, "
+			       .        "sequence, "
+			       .        "sizegb) "
+			       . "VALUES "
+			       .        "($imageid, "
+			       .        "$seq, "
+			       .        "$sizegb)";
+			doQuery($query);
+			$seq++;
+		}
 	}
 
 	/////////////////////////////////////////////////////////////////////////////

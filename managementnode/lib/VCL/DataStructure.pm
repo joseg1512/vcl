@@ -2277,6 +2277,33 @@ sub get_image_minram {
 
 #//////////////////////////////////////////////////////////////////////////////
 
+=head2 get_image_additional_disks
+
+ Parameters  : none
+ Returns     : array
+ Description : Returns the additional empty disks configured for the image.
+               Each element is a hash containing sequence and sizegb. Returns
+               an empty list if none are configured.
+
+=cut
+
+sub get_image_additional_disks {
+	my $self = shift;
+	unless (ref($self) && $self->isa('VCL::DataStructure')) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine can only be called as a VCL::DataStructure module object method");
+		return;
+	}
+	
+	my $reservation_id = $self->reservation_id;
+	my $disks = $self->request_data->{reservation}{$reservation_id}{image}{additionaldisks};
+	if (!defined($disks) || ref($disks) ne 'ARRAY') {
+		return ();
+	}
+	return @{$disks};
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
 =head2 get_reservation_info_json_string
 
  Parameters  : none

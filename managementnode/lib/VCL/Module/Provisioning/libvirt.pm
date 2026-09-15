@@ -500,7 +500,13 @@ EOF
 		return;
 	}
 	elsif (scalar @disk_file_paths > 1) {
-		notify($ERRORS{'WARNING'}, 0, "found multiple disks defined in the XML definition for $domain_name, only the first disk will be captured:\n" . format_data(\@disk_file_paths));
+		my @additional_disk_paths = grep { /_adddisk\d+\./i } @disk_file_paths;
+		if (scalar(@additional_disk_paths) && scalar(@additional_disk_paths) == scalar(@disk_file_paths) - 1) {
+			notify($ERRORS{'DEBUG'}, 0, "ignoring ephemeral additional disks during capture of $domain_name, only the OS disk will be captured:\n" . format_data(\@additional_disk_paths));
+		}
+		else {
+			notify($ERRORS{'WARNING'}, 0, "found multiple disks defined in the XML definition for $domain_name, only the first disk will be captured:\n" . format_data(\@disk_file_paths));
+		}
 	}
 
 	# Copy the linked clone to create a new master image file
@@ -2043,8 +2049,215 @@ EOF
 		}
 	}
 
+	if (!$self->add_additional_disks_to_domain_xml($xml_hashref, $disk_bus_type, $disk_driver_name, $add_disk_cache)) {
+		notify($ERRORS{'WARNING'}, 0, "failed to add additional disks to domain XML for $computer_name");
+		return;
+	}
+
 	notify($ERRORS{'DEBUG'}, 0, "generated domain XML:\n" . format_data($xml_hashref));
 	return hash_to_xml_string($xml_hashref, 'domain');
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 get_additional_disk_file_path
+
+ Parameters  : $sequence
+ Returns     : string
+ Description : Returns the path of an ephemeral additional disk for this
+               reservation. The file name begins with the computer name so
+               delete_domain will remove it. Example:
+               '/var/lib/libvirt/images/vclv99-37_adddisk1.qcow2'
+
+=cut
+
+sub get_additional_disk_file_path {
+	my $self = shift;
+	unless (ref($self) && $self->isa('VCL::Module')) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	
+	my $sequence = shift;
+	if (!defined($sequence) || $sequence !~ /^\d+$/ || $sequence < 1) {
+		notify($ERRORS{'WARNING'}, 0, "additional disk sequence argument is invalid");
+		return;
+	}
+	
+	my $vmhost_vmpath = $self->data->get_vmhost_profile_vmpath();
+	my $computer_name = $self->data->get_computer_short_name();
+	return "$vmhost_vmpath/${computer_name}_adddisk${sequence}.qcow2";
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 get_additional_disk_bus_type
+
+ Parameters  : $os_disk_bus_type (optional)
+ Returns     : string
+ Description : Bus used for additional disks. Matches the OS disk unless the
+               guest is ESXi, in which case virtio is replaced with scsi.
+
+=cut
+
+sub get_additional_disk_bus_type {
+	my $self = shift;
+	unless (ref($self) && $self->isa('VCL::Module')) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	
+	my $os_disk_bus_type = shift || $self->get_master_xml_disk_bus_type() || 'ide';
+	my $image_os_name = $self->data->get_image_os_name() || '';
+	if ($image_os_name =~ /esxi/i && $os_disk_bus_type =~ /virtio/i) {
+		notify($ERRORS{'DEBUG'}, 0, "forcing additional disk bus to scsi for ESXi guest (OS disk bus is $os_disk_bus_type)");
+		return 'scsi';
+	}
+	return $os_disk_bus_type;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 get_additional_disk_target_dev
+
+ Parameters  : $bus, $index
+ Returns     : string
+ Description : Libvirt target device name for additional disk $index (0-based).
+               The OS disk remains vda (disk[0]). Extra virtio disks start at
+               vdb; scsi/sata at sda; ide at hdb.
+
+=cut
+
+sub get_additional_disk_target_dev {
+	my $self = shift;
+	my ($bus, $index) = @_;
+	$bus = $bus || 'virtio';
+	$index = 0 unless defined($index);
+	if ($bus =~ /virtio/i) {
+		return 'vd' . chr(ord('b') + $index);
+	}
+	elsif ($bus =~ /ide/i) {
+		return 'hd' . chr(ord('b') + $index);
+	}
+	return 'sd' . chr(ord('a') + $index);
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 get_configured_additional_disks
+
+ Parameters  : none
+ Returns     : array
+ Description : Returns additional disk configuration for the current image,
+               including file path, bus, and target device. The OS disk remains
+               first so capture continues to use disk[0].
+
+=cut
+
+sub get_configured_additional_disks {
+	my $self = shift;
+	unless (ref($self) && $self->isa('VCL::Module')) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	
+	my @configured = $self->data->get_image_additional_disks();
+	return () unless @configured;
+	
+	if (scalar(@configured) > 10) {
+		notify($ERRORS{'WARNING'}, 0, "image has more than 10 additional disks configured, only the first 10 will be attached");
+		@configured = @configured[0 .. 9];
+	}
+	
+	my $bus = $self->get_additional_disk_bus_type();
+	my @disks;
+	my $index = 0;
+	for my $disk (@configured) {
+		my $sequence = $disk->{sequence} || ($index + 1);
+		my $sizegb = $disk->{sizegb};
+		next unless defined($sizegb) && $sizegb =~ /^\d+$/ && $sizegb >= 1;
+		my $file_path = $self->get_additional_disk_file_path($sequence);
+		next unless $file_path;
+		push @disks, {
+			sequence => $sequence,
+			sizegb => $sizegb + 0,
+			file_path => $file_path,
+			bus => $bus,
+			target_dev => $self->get_additional_disk_target_dev($bus, $index),
+		};
+		$index++;
+	}
+	return @disks;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 add_additional_disks_to_domain_xml
+
+ Parameters  : $xml_hashref, $os_disk_bus_type, $disk_driver_name, $add_disk_cache
+ Returns     : boolean
+ Description : Appends additional empty disks after the OS disk in the domain
+               XML hash so the OS remains disk[0].
+
+=cut
+
+sub add_additional_disks_to_domain_xml {
+	my $self = shift;
+	unless (ref($self) && $self->isa('VCL::Module')) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	
+	my ($xml_hashref, $os_disk_bus_type, $disk_driver_name, $add_disk_cache) = @_;
+	if (!$xml_hashref || ref($xml_hashref) ne 'HASH') {
+		notify($ERRORS{'WARNING'}, 0, "unable to add additional disks, domain XML hash was not supplied");
+		return;
+	}
+	
+	my @disks = $self->get_configured_additional_disks();
+	return 1 unless @disks;
+	
+	my $extra_bus = $disks[0]->{bus};
+	if ($extra_bus =~ /scsi/i && (!$os_disk_bus_type || $os_disk_bus_type !~ /scsi/i)) {
+		$xml_hashref->{'devices'}[0]{'controller'} ||= [];
+		push @{$xml_hashref->{'devices'}[0]{'controller'}}, {
+			'type' => 'scsi',
+			'index' => 0,
+			'model' => 'lsilogic',
+		};
+	}
+	elsif ($extra_bus =~ /sata/i && (!$os_disk_bus_type || $os_disk_bus_type !~ /sata/i)) {
+		$xml_hashref->{'devices'}[0]{'controller'} ||= [];
+		push @{$xml_hashref->{'devices'}[0]{'controller'}}, {
+			'type' => 'sata',
+			'index' => 0,
+		};
+	}
+	
+	for my $disk (@disks) {
+		my %disk_xml = (
+			'device' => 'disk',
+			'type' => 'file',
+			'driver' => {
+				'name' => $disk_driver_name,
+				'type' => 'qcow2',
+			},
+			'source' => {
+				'file' => $disk->{file_path},
+			},
+			'target' => {
+				'bus' => $disk->{bus},
+				'dev' => $disk->{target_dev},
+			},
+		);
+		if ($add_disk_cache) {
+			$disk_xml{'driver'}{'cache'} = 'none';
+		}
+		push @{$xml_hashref->{'devices'}[0]{'disk'}}, \%disk_xml;
+		notify($ERRORS{'DEBUG'}, 0, "added additional disk $disk->{sequence} ($disk->{sizegb}G) as $disk->{target_dev} ($disk->{bus}): $disk->{file_path}");
+	}
+	
+	return 1;
 }
 
 #//////////////////////////////////////////////////////////////////////////////

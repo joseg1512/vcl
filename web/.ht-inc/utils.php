@@ -1489,6 +1489,8 @@ function getOSList() {
 /// \b connectmethods - array of enabled connect methods\n
 /// \b subimages - an array of subimages to be loaded along with selected
 /// image\n
+/// \b additionaldisks - array of extra empty disks for the image, each with
+/// sequence and sizegb; empty if Additional disks is unchecked\n
 /// \b imagerevision - an array of revision info about the image, it has these
 /// keys: id, revision, userid, user, datecreated, prettydate, production,
 /// imagename
@@ -1608,6 +1610,7 @@ function getImages($includedeleted=0, $imageid=0) {
 		$imagelist[$includedeleted][$row['id']]['adauthenabled'] = 0;
 		if($row['addomainid'] != NULL)
 			$imagelist[$includedeleted][$row['id']]['adauthenabled'] = 1;
+		$imagelist[$includedeleted][$row['id']]['additionaldisks'] = array();
 		if($row["imagemetaid"] != NULL) {
 			if(isset($allmetadata[$row['imagemetaid']])) {
 				$metaid = $row['imagemetaid'];
@@ -1632,6 +1635,21 @@ function getImages($includedeleted=0, $imageid=0) {
 		if(isset($allrevisiondata[$row['id']]))
 			$imagelist[$includedeleted][$row['id']]['imagerevision'] = $allrevisiondata[$row['id']];
 		$imagelist[$includedeleted][$row['id']]['connectmethods'] = getImageConnectMethods($row['id']);
+	}
+	$query = "SELECT imageid, "
+	       .        "sequence, "
+	       .        "sizegb "
+	       . "FROM imageadditionaldisk "
+	       . "ORDER BY imageid, sequence";
+	$qh = doQuery($query);
+	while($row = mysqli_fetch_assoc($qh)) {
+		$id = $row['imageid'];
+		if(isset($imagelist[$includedeleted][$id])) {
+			$imagelist[$includedeleted][$id]['additionaldisks'][] = array(
+				'sequence' => (int)$row['sequence'],
+				'sizegb' => (int)$row['sizegb']
+			);
+		}
 	}
 	if($imageid != 0)
 		return array($imageid => $imagelist[$includedeleted][$imageid]);

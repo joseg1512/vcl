@@ -151,5 +151,9 @@ nlsmessages = {
 'Default for User':'',
 'Invalid Max Reservation Duration selected':'',
 'minutes':'',
-'Passwords do not match':''
+'Passwords do not match':'',
+'Additional disks must include at least one disk':'Los discos adicionales deben incluir al menos un disco',
+'Each additional disk size must be between 1 and 4096 GB':'El tamaño de cada disco adicional debe estar entre 1 y 4096 GB',
+'Add disk':'Agregar disco',
+'Remove disk':'Quitar disco'
 }

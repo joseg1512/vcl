@@ -247,6 +247,11 @@ sub pre_define {
 		}
 	}
 	
+	if (!$self->create_additional_disks()) {
+		notify($ERRORS{'WARNING'}, 0, "failed to prepare virtual disk, unable to create additional empty disks");
+		return;
+	}
+	
 	return 1;
 }
 
@@ -719,6 +724,61 @@ sub create_copy_on_write_image {
 		notify($ERRORS{'DEBUG'}, 0, "created copy on write image: $copy_on_write_file_path, output:\n" . join("\n", @$output));
 		return 1;
 	}
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 create_additional_disks
+
+ Parameters  : none
+ Returns     : boolean
+ Description : Creates empty qcow2 disks (no backing file) for additional disks
+               configured on the image. Files are named
+               {computer}_adddiskN.qcow2 under vmpath so delete_domain removes
+               them. The OS copy-on-write image remains the first disk.
+
+=cut
+
+sub create_additional_disks {
+	my $self = shift;
+	unless (ref($self) && $self->isa('VCL::Module')) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	
+	my @disks = $self->get_configured_additional_disks();
+	if (!@disks) {
+		notify($ERRORS{'DEBUG'}, 0, "image has no additional disks configured");
+		return 1;
+	}
+	
+	my $node_name = $self->data->get_vmhost_short_name();
+	for my $disk (@disks) {
+		my $file_path = $disk->{file_path};
+		my $sizegb = $disk->{sizegb};
+		if ($self->vmhost_os->file_exists($file_path)) {
+			notify($ERRORS{'DEBUG'}, 0, "deleting existing additional disk before recreate: $file_path");
+			if (!$self->vmhost_os->delete_file($file_path)) {
+				notify($ERRORS{'WARNING'}, 0, "failed to delete existing additional disk: $file_path");
+				return;
+			}
+		}
+		
+		my $command = "qemu-img create -f qcow2 \"$file_path\" ${sizegb}G";
+		notify($ERRORS{'DEBUG'}, 0, "creating empty additional disk on $node_name: $command");
+		my ($exit_status, $output) = $self->vmhost_os->execute($command);
+		if (!defined($exit_status)) {
+			notify($ERRORS{'WARNING'}, 0, "failed to execute command to create additional disk on $node_name: '$command'");
+			return;
+		}
+		elsif ($exit_status) {
+			notify($ERRORS{'WARNING'}, 0, "failed to create additional disk on $node_name, command: '$command', output:\n" . join("\n", @$output));
+			return;
+		}
+		notify($ERRORS{'OK'}, 0, "created empty additional disk $disk->{sequence} (${sizegb}G): $file_path");
+	}
+	
+	return 1;
 }
 
 #//////////////////////////////////////////////////////////////////////////////

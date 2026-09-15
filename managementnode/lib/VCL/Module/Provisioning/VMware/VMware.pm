@@ -869,14 +869,14 @@ sub capture {
 	my $vmx_info = $self->get_vmx_info($vmx_file_path_original);
 	notify($ERRORS{'DEBUG'}, 0, "vmx info for VM $computer_name being captured:\n" . format_data($vmx_info));
 	
-	# Get the vmdk info from the vmx info
-	my @vmdk_identifiers = keys %{$vmx_info->{vmdk}};
+	# Get the vmdk info from the vmx info, ignoring ephemeral additional disks
+	my @vmdk_identifiers = $self->get_os_vmdk_identifiers($vmx_info);
 	if (!@vmdk_identifiers) {
 		notify($ERRORS{'WARNING'}, 0, "did not find vmdk file path ({vmdk} key is missing) in vmx info for VM $computer_name being captured:\n" . format_data($vmx_info));
 		return;
 	}
 	elsif (scalar(@vmdk_identifiers) > 1) {
-		notify($ERRORS{'WARNING'}, 0, "found multiple vmdk file paths ({vmdk} keys) in vmx info for VM $computer_name being captured:\n" . format_data($vmx_info));
+		notify($ERRORS{'WARNING'}, 0, "found multiple OS vmdk file paths ({vmdk} keys) in vmx info for VM $computer_name being captured:\n" . format_data($vmx_info));
 		return;
 	}
 	
@@ -1861,6 +1861,11 @@ sub prepare_vmx {
 		));
 	}
 	
+	if (!$self->attach_additional_disks_to_vmx(\%vmx_parameters, $vmx_directory_path, $computer_name, $vm_disk_adapter_type, $vm_disk_mode, $vm_disk_write_through, $vm_disk_shared_bus)) {
+		notify($ERRORS{'WARNING'}, 0, "failed to attach additional disks for $computer_name");
+		return;
+	}
+	
 	if ($vm_hardware_version >= 7) {
 		%vmx_parameters = (%vmx_parameters, (
 			"pciBridge0.present" => "TRUE",
@@ -1969,6 +1974,249 @@ sub prepare_vmx {
 	}
 	else {
 		notify($ERRORS{'WARNING'}, 0, "failed to delete temporary vmx file: $temp_vmx_file_path, error: $!");
+	}
+	
+	return 1;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 is_additional_disk_vmdk_path
+
+ Parameters  : $vmdk_file_path
+ Returns     : boolean
+ Description : Returns true if the vmdk path matches the ephemeral additional
+               disk naming pattern: {computer}_adddiskN.vmdk
+
+=cut
+
+sub is_additional_disk_vmdk_path {
+	my $self = shift;
+	my $vmdk_file_path = shift || '';
+	return ($vmdk_file_path =~ /_adddisk\d+\.vmdk$/i) ? 1 : 0;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 get_os_vmdk_identifiers
+
+ Parameters  : $vmx_info
+ Returns     : array
+ Description : Returns vmx storage identifiers for OS disks, excluding
+               ephemeral additional-disk vmdks.
+
+=cut
+
+sub get_os_vmdk_identifiers {
+	my $self = shift;
+	if (ref($self) !~ /vmware/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	
+	my $vmx_info = shift;
+	return () unless $vmx_info && ref($vmx_info->{vmdk}) eq 'HASH';
+	
+	my @identifiers;
+	for my $identifier (keys %{$vmx_info->{vmdk}}) {
+		my $vmdk_file_path = $vmx_info->{vmdk}{$identifier}{vmdk_file_path} || '';
+		if ($self->is_additional_disk_vmdk_path($vmdk_file_path)) {
+			notify($ERRORS{'DEBUG'}, 0, "ignoring additional disk vmdk $identifier: $vmdk_file_path");
+			next;
+		}
+		push @identifiers, $identifier;
+	}
+	
+	@identifiers = sort {
+		return -1 if $a =~ /^(scsi0:0|ide0:0)$/;
+		return 1 if $b =~ /^(scsi0:0|ide0:0)$/;
+		return $a cmp $b;
+	} @identifiers;
+	
+	return @identifiers;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 get_additional_disk_thin_bytes_required
+
+ Parameters  : none
+ Returns     : integer
+ Description : Estimates host space needed for thin additional disks. Thin
+               vmdks do not consume their full virtual size; 10% of the
+               configured size plus a small metadata allowance is used.
+
+=cut
+
+sub get_additional_disk_thin_bytes_required {
+	my $self = shift;
+	if (ref($self) !~ /vmware/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	
+	my @disks = $self->data->get_image_additional_disks();
+	return 0 unless @disks;
+	
+	my $bytes = 0;
+	for my $disk (@disks) {
+		my $sizegb = $disk->{sizegb} || 0;
+		next unless $sizegb >= 1;
+		$bytes += int($sizegb * 1024 * 1024 * 1024 * 0.10);
+		$bytes += (2 * 1024 * 1024);
+	}
+	return $bytes;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 create_empty_vmdk
+
+ Parameters  : $vmdk_file_path, $size_gb
+ Returns     : boolean
+ Description : Creates an empty thin vmdk using vmkfstools -c.
+
+=cut
+
+sub create_empty_vmdk {
+	my $self = shift;
+	if (ref($self) !~ /vmware/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	
+	my ($vmdk_file_path, $size_gb) = @_;
+	if (!$vmdk_file_path || !$size_gb || $size_gb !~ /^\d+$/ || $size_gb < 1) {
+		notify($ERRORS{'WARNING'}, 0, "unable to create empty vmdk, path or size argument is invalid");
+		return;
+	}
+	
+	my $vmhost_name = $self->data->get_vmhost_short_name() || '';
+	
+	if ($self->vmhost_os->file_exists($vmdk_file_path)) {
+		notify($ERRORS{'DEBUG'}, 0, "deleting existing additional disk vmdk before recreate: $vmdk_file_path");
+		my $delete_command = "vmkfstools -U \"$vmdk_file_path\"";
+		my ($delete_status, $delete_output) = $self->vmhost_os->execute($delete_command);
+		if (!defined($delete_status) || $delete_status) {
+			notify($ERRORS{'DEBUG'}, 0, "vmkfstools -U failed or is unavailable, attempting to delete file: $vmdk_file_path");
+			$self->vmhost_os->delete_file($vmdk_file_path);
+		}
+	}
+	
+	my $command = "vmkfstools -c ${size_gb}G -d thin \"$vmdk_file_path\"";
+	notify($ERRORS{'DEBUG'}, 0, "creating empty thin vmdk on VM host $vmhost_name: $command");
+	my ($exit_status, $output) = $self->vmhost_os->execute($command);
+	if (!defined($exit_status)) {
+		notify($ERRORS{'WARNING'}, 0, "failed to execute command to create empty vmdk on VM host $vmhost_name: $command");
+		return;
+	}
+	elsif ($exit_status) {
+		notify($ERRORS{'WARNING'}, 0, "failed to create empty vmdk on VM host $vmhost_name, command: $command, output:\n" . join("\n", @$output));
+		return;
+	}
+	
+	if (!$self->vmhost_os->file_exists($vmdk_file_path)) {
+		notify($ERRORS{'WARNING'}, 0, "vmkfstools reported success but vmdk does not exist: $vmdk_file_path");
+		return;
+	}
+	
+	notify($ERRORS{'OK'}, 0, "created empty thin vmdk: $vmdk_file_path (${size_gb}G)");
+	return 1;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 attach_additional_disks_to_vmx
+
+ Parameters  : $vmx_parameters, $vmx_directory_path, $computer_name,
+               $vm_disk_adapter_type, $vm_disk_mode, $vm_disk_write_through,
+               $vm_disk_shared_bus
+ Returns     : boolean
+ Description : Creates empty additional vmdks in the VM directory and adds
+               SCSI entries to the vmx parameter hash. Extra disks never use
+               the shared master path. If the OS disk is IDE, a SCSI adapter
+               is added so extra disks do not consume IDE slots used by the
+               OS disk and CDROM.
+
+=cut
+
+sub attach_additional_disks_to_vmx {
+	my $self = shift;
+	if (ref($self) !~ /vmware/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	
+	my ($vmx_parameters, $vmx_directory_path, $computer_name, $vm_disk_adapter_type, $vm_disk_mode, $vm_disk_write_through, $vm_disk_shared_bus) = @_;
+	if (!$vmx_parameters || ref($vmx_parameters) ne 'HASH' || !$vmx_directory_path || !$computer_name) {
+		notify($ERRORS{'WARNING'}, 0, "unable to attach additional disks, required arguments were not supplied");
+		return;
+	}
+	
+	my @disks = $self->data->get_image_additional_disks();
+	if (!@disks) {
+		notify($ERRORS{'DEBUG'}, 0, "image has no additional disks configured");
+		return 1;
+	}
+	
+	if (scalar(@disks) > 10) {
+		notify($ERRORS{'WARNING'}, 0, "image has more than 10 additional disks configured, only the first 10 will be attached");
+		@disks = @disks[0 .. 9];
+	}
+	
+	my $os_uses_scsi = ($vm_disk_adapter_type && $vm_disk_adapter_type !~ /ide/i) ? 1 : 0;
+	my $scsi_adapter_type = $os_uses_scsi ? $vm_disk_adapter_type : 'lsilogic';
+	
+	# SCSI unit 7 is reserved for the adapter. Skip scsi0:0 when the OS disk
+	# already occupies it.
+	my @slots;
+	for my $adapter (0, 1) {
+		for my $unit (0 .. 15) {
+			next if $unit == 7;
+			next if $adapter == 0 && $unit == 0 && $os_uses_scsi;
+			push @slots, [$adapter, $unit];
+		}
+	}
+	
+	if (scalar(@slots) < scalar(@disks)) {
+		notify($ERRORS{'WARNING'}, 0, "not enough SCSI slots for " . scalar(@disks) . " additional disks");
+		return;
+	}
+	
+	my %seen_adapter;
+	$seen_adapter{0} = 1 if $os_uses_scsi;
+	
+	my $index = 0;
+	for my $disk (@disks) {
+		my $sequence = $disk->{sequence} || ($index + 1);
+		my $sizegb = $disk->{sizegb};
+		if (!$sizegb || $sizegb < 1) {
+			notify($ERRORS{'WARNING'}, 0, "invalid additional disk size for sequence $sequence");
+			return;
+		}
+		
+		my ($adapter, $unit) = @{$slots[$index]};
+		my $vmdk_file_path = "$vmx_directory_path/${computer_name}_adddisk${sequence}.vmdk";
+		if (!$self->create_empty_vmdk($vmdk_file_path, $sizegb)) {
+			notify($ERRORS{'WARNING'}, 0, "failed to create additional disk $sequence: $vmdk_file_path");
+			return;
+		}
+		
+		if (!$seen_adapter{$adapter}) {
+			$vmx_parameters->{"scsi$adapter.present"} = "TRUE";
+			$vmx_parameters->{"scsi$adapter.virtualDev"} = "$scsi_adapter_type";
+			$seen_adapter{$adapter} = 1;
+		}
+		
+		$vmx_parameters->{"scsi$adapter:$unit.fileName"} = "$vmdk_file_path";
+		$vmx_parameters->{"scsi$adapter:$unit.mode"} = "$vm_disk_mode";
+		$vmx_parameters->{"scsi$adapter:$unit.present"} = "TRUE";
+		$vmx_parameters->{"scsi$adapter:$unit.writeThrough"} = "$vm_disk_write_through";
+		$vmx_parameters->{"scsi$adapter:$unit.sharedBus"} = "$vm_disk_shared_bus";
+		$vmx_parameters->{"scsi$adapter:$unit.deviceType"} = "scsi-hardDisk";
+		
+		notify($ERRORS{'DEBUG'}, 0, "attached additional disk $sequence (${sizegb}G) as scsi$adapter:$unit: $vmdk_file_path");
+		$index++;
 	}
 	
 	return 1;
@@ -3490,7 +3738,7 @@ sub get_vmdk_file_path {
 		my $vmx_info = $self->get_vmx_info($vmx_file_path);
 		if ($vmx_info) {
 			# Get the vmdk info from the vmx info
-			my @vmdk_identifiers = keys %{$vmx_info->{vmdk}};
+			my @vmdk_identifiers = $self->get_os_vmdk_identifiers($vmx_info);
 			if (@vmdk_identifiers) {
 				# Get the vmdk file path from the vmx information
 				my $vmdk_file_path = $vmx_info->{vmdk}{$vmdk_identifiers[0]}{vmdk_file_path};
@@ -6030,6 +6278,15 @@ sub get_vm_additional_vmx_bytes_required {
 	my $vm_ram_bytes = ($vm_ram_mb * 1024 * 1024);
 	$additional_bytes_required += $vm_ram_bytes;
 	notify($ERRORS{'DEBUG'}, 0, "$vm_ram_bytes additional bytes required for VM vmem file");
+	
+	# Additional thin disks live in the VM (vmx) directory. Count a fraction of
+	# the virtual size so host space checks remain conservative without treating
+	# thin disks as fully provisioned.
+	my $additional_disk_thin_bytes = $self->get_additional_disk_thin_bytes_required();
+	if ($additional_disk_thin_bytes) {
+		$additional_bytes_required += $additional_disk_thin_bytes;
+		notify($ERRORS{'DEBUG'}, 0, "$additional_disk_thin_bytes additional bytes required for additional thin disks in the vmx directory");
+	}
 	
 	# Check if the VM is shared
 	# If shared, add bytes for the delta/REDO files

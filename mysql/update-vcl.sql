@@ -1046,6 +1046,24 @@ CREATE TABLE IF NOT EXISTS `imageaddomain` (
 -- --------------------------------------------------------
 
 -- 
+--  Table structure for table `imageadditionaldisk`
+--
+
+CREATE TABLE IF NOT EXISTS `imageadditionaldisk` (
+  `id` smallint(5) unsigned NOT NULL auto_increment,
+  `imageid` smallint(5) unsigned NOT NULL,
+  `sequence` tinyint(3) unsigned NOT NULL,
+  `sizegb` smallint(5) unsigned NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `imageid_sequence` (`imageid`,`sequence`),
+  KEY `imageid` (`imageid`)
+) ENGINE=InnoDB DEFAULT CHARSET=latin1;
+
+CALL Add2ColUniqueIndexIfNotExist('imageadditionaldisk', 'imageid', 'sequence');
+
+-- --------------------------------------------------------
+
+-- 
 --  Table structure for table `imagemeta`
 --
 
@@ -2357,6 +2375,7 @@ CALL AddConstraintIfNotExists('image', 'imagetypeid', 'imagetype', 'id', 'update
 CALL AddConstraintIfNotExists('image', 'imagemetaid', 'imagemeta', 'id', 'both', 'nullCASCADE');
 UPDATE image SET basedoffrevisionid = NULL WHERE basedoffrevisionid NOT IN (SELECT id FROM imagerevision);
 CALL AddConstraintIfNotExists('image', 'basedoffrevisionid', 'imagerevision', 'id', 'update', 'CASCADE');
+CALL AddConstraintIfNotExists('imageadditionaldisk', 'imageid', 'image', 'id', 'both', 'CASCADE');
 
 -- --------------------------------------------------------
 
