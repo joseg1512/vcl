@@ -60,7 +60,9 @@ VCL::Module::OS::Linux::ESXi.pm
  configure_default_sshd / rc.local  Skip: single TSM-SSH, no rc.local tooling
  firewall process_pre_capture       esxcli network firewall: keep sshServer
  clean_known_files                  Skip: Linux log/udev/ifcfg paths
- enable_dhcp + ifcfg-* / route-*    esxcli network ip interface ipv4 set --type=dhcp
+ enable_dhcp + ifcfg-* / route-*    FollowHardwareMac + Instant Clone-style
+                                    vmk0 recreate + DHCP (DHCP-only leaves
+                                    baked MAC/IP in esx.conf)
  /etc/sysconfig/network HOSTNAME    esxcli system hostname (cleared to image default)
  shutdown -h now                    esxcli system shutdown poweroff
  provisioner capture                Unchanged: VMware.pm copies/renames vmdk
@@ -242,8 +244,15 @@ sub get_init_modules {
  Returns     : boolean
  Description : Prepares an ESXi guest for image capture. Calls OS.pm
                pre_capture (not Linux.pm), then ESXi-specific cleanup:
-               NFS datastores, VCL accounts, root password, DHCP on
-               VMkernel NICs, power off.
+               NFS datastores, VCL accounts, root password, SSH, generalize
+               the management VMkernel (FollowHardwareMac + vmk0 recreate +
+               DHCP), power off.
+
+               DHCP alone is not enough: esxcli ipv4 --type=dhcp leaves the
+               vmk0 MAC and often the last address in /etc/vmware/esx.conf,
+               so clones boot with the capture host's identity. Load-time
+               GuestOps (_bootstrap_nested_management_network) still rewrites
+               vmk0 for older images; this path makes *new* captures cleaner.
 
 =cut
 
@@ -289,15 +298,46 @@ sub pre_capture {
 	$self->_ensure_ssh_enabled();
 	$self->_enable_esxi_ruleset('sshServer', 'all');
 	
+	# Capture-time identity generalize (SSH is still up).
+	# Order matters:
+	#   1. NFS / accounts / root password / TSM-SSH  — need a working vmk0
+	#   2. FollowHardwareMac + UUID scrub + lease cleanup + auto-backup — SSH stays
+	#   3. Detached Instant Clone-style vmk0 recreate + DHCP — SSH will drop
+	#   4. enable_dhcp verify if SSH returns (same DHCP IP)
+	#   5. shutdown() — esxcli if SSH is up, else provisioner power_off
+	# Do not call _bootstrap_nested_management_network here: that path is
+	# GuestOps (no guest SSH) and assigns the *reservation* static IP at load.
 	my $private_interface_name = $self->get_private_interface_name();
 	my $public_interface_name = $self->get_public_interface_name();
+	my $management_interface_name = ($private_interface_name && $private_interface_name =~ /^vmk\d+$/) ? $private_interface_name : 'vmk0';
 	
-	if ($private_interface_name && !$self->enable_dhcp($private_interface_name)) {
-		notify($ERRORS{'WARNING'}, 0, "failed to enable DHCP on the private VMkernel interface");
-		return;
+	my $vmk_recreated = $self->_generalize_management_vmkernel($management_interface_name);
+	
+	if ($self->wait_for_ssh(0)) {
+		if ($private_interface_name && !$self->enable_dhcp($private_interface_name)) {
+			if ($vmk_recreated) {
+				notify($ERRORS{'WARNING'}, 0, "failed to verify DHCP on the private VMkernel interface after generalize; the detached guest script should already have set DHCP");
+			}
+			else {
+				notify($ERRORS{'WARNING'}, 0, "failed to enable DHCP on the private VMkernel interface");
+				return;
+			}
+		}
+		if ($public_interface_name && $public_interface_name ne ($private_interface_name || '') && !$self->enable_dhcp($public_interface_name)) {
+			if ($vmk_recreated) {
+				notify($ERRORS{'WARNING'}, 0, "failed to verify DHCP on the public VMkernel interface after generalize; the detached guest script should already have set DHCP");
+			}
+			else {
+				notify($ERRORS{'WARNING'}, 0, "failed to enable DHCP on the public VMkernel interface");
+				return;
+			}
+		}
 	}
-	if ($public_interface_name && $public_interface_name ne ($private_interface_name || '') && !$self->enable_dhcp($public_interface_name)) {
-		notify($ERRORS{'WARNING'}, 0, "failed to enable DHCP on the public VMkernel interface");
+	elsif ($vmk_recreated) {
+		notify($ERRORS{'DEBUG'}, 0, "SSH not available after vmk0 recreate on $computer_node_name (expected if DHCP issued a different address); DHCP was set on-guest, proceeding to shutdown");
+	}
+	else {
+		notify($ERRORS{'WARNING'}, 0, "SSH not available on $computer_node_name and management VMkernel was not recreated; cannot enable DHCP");
 		return;
 	}
 	
@@ -344,8 +384,10 @@ sub post_load {
 	
 	notify($ERRORS{'OK'}, 0, "beginning ESXi post_load tasks, image: $image_name, computer: $computer_node_name");
 	
-	# Nested ESXi golden images persist vmk0 IP/MAC in esx.conf. Rewrite that
-	# over GuestOperationsManager before wait_for_ssh (chicken-and-egg).
+	# Nested ESXi golden images persist vmk0 IP/MAC in esx.conf. New captures
+	# generalize this in pre_capture (FollowHardwareMac + vmk recreate + DHCP).
+	# This GuestOps rewrite still covers older images and any clone whose
+	# identity drifted, and it runs before wait_for_ssh (chicken-and-egg).
 	if (!$self->_bootstrap_nested_management_network()) {
 		notify($ERRORS{'WARNING'}, 0, "nested ESXi management-network bootstrap did not complete; still attempting SSH to $computer_node_name");
 	}
@@ -2775,6 +2817,317 @@ sub get_default_gateway {
 
 	notify($ERRORS{'DEBUG'}, 0, "ESXi nested: returning management node default gateway: $gateway");
 	return $gateway;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 _get_vmkernel_portgroup
+
+ Parameters  : $interface_name (vmkN)
+ Returns     : portgroup string or undef
+ Description : Parses `esxcli network ip interface list` for the Portgroup
+               attached to the given VMkernel NIC. Used before recreating
+               the NIC so it is re-added on the same portgroup.
+
+=cut
+
+sub _get_vmkernel_portgroup {
+	my $self = shift;
+	if (ref($self) !~ /VCL::Module/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	
+	my $interface_name = shift || '';
+	if ($interface_name !~ /^vmk\d+$/) {
+		notify($ERRORS{'WARNING'}, 0, "invalid VMkernel interface name: '$interface_name'");
+		return;
+	}
+	
+	my ($exit_status, $output) = $self->execute('esxcli network ip interface list');
+	if (!defined($output) || !@$output) {
+		notify($ERRORS{'DEBUG'}, 0, "unable to list VMkernel interfaces while looking up portgroup for $interface_name");
+		return;
+	}
+	
+	my $in_block = 0;
+	for my $line (@$output) {
+		if ($line =~ /^(vmk\d+)\s*$/ || $line =~ /^\s*Name:\s+(vmk\d+)/) {
+			$in_block = ($1 eq $interface_name) ? 1 : 0;
+			next;
+		}
+		if ($in_block && $line =~ /^\s*Port\s*Group:\s+(.+?)\s*$/i) {
+			my $portgroup = $1;
+			notify($ERRORS{'DEBUG'}, 0, "$interface_name portgroup: $portgroup");
+			return $portgroup;
+		}
+	}
+	
+	notify($ERRORS{'DEBUG'}, 0, "portgroup for $interface_name was not present in esxcli network ip interface list output");
+	return;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 _enable_follow_hardware_mac
+
+ Parameters  : none
+ Returns     : boolean
+ Description : Sets /Net/FollowHardwareMac=1 so a cloned nested ESXi guest
+               binds vmk0 to the hypervisor-assigned vNIC MAC instead of the
+               MAC baked into esx.conf. Idempotent. Does not drop SSH.
+
+=cut
+
+sub _enable_follow_hardware_mac {
+	my $self = shift;
+	if (ref($self) !~ /VCL::Module/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	
+	my $computer_name = $self->data->get_computer_node_name();
+	my $command = 'esxcli system settings advanced set -o /Net/FollowHardwareMac -i 1';
+	my ($exit_status, $output) = $self->execute($command);
+	if (!defined($output) || (defined($exit_status) && $exit_status ne '0')) {
+		($exit_status, $output) = $self->execute('esxcfg-advcfg -s 1 /Net/FollowHardwareMac');
+		if (!defined($output) || (defined($exit_status) && $exit_status ne '0' && !grep(/already|success/i, @$output))) {
+			notify($ERRORS{'WARNING'}, 0, "failed to enable /Net/FollowHardwareMac on $computer_name");
+			return;
+		}
+	}
+	
+	notify($ERRORS{'OK'}, 0, "enabled /Net/FollowHardwareMac on $computer_name so clones follow the hypervisor-assigned vNIC MAC");
+	return 1;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 _scrub_esxi_capture_identity
+
+ Parameters  : none
+ Returns     : boolean
+ Description : Clears sticky identity that survives DHCP-only prep:
+                 * /system/uuid in esx.conf (clones generate a new UUID)
+                 * dhclient lease files
+               Does not drop SSH. Does not sed-edit vmk MAC/IP keys while
+               hostd is running; those are cleared by recreating vmk0.
+
+=cut
+
+sub _scrub_esxi_capture_identity {
+	my $self = shift;
+	if (ref($self) !~ /VCL::Module/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	
+	my $computer_name = $self->data->get_computer_node_name();
+	
+	# William Lam nested-ESXi clone prep: delete /system/uuid so the next
+	# boot of a clone generates a new UUID. BusyBox sed -i is available.
+	my ($uuid_exit, $uuid_output) = $self->execute("sed -i 's#/system/uuid.*##' /etc/vmware/esx.conf");
+	if (!defined($uuid_output) || (defined($uuid_exit) && $uuid_exit ne '0')) {
+		notify($ERRORS{'WARNING'}, 0, "failed to clear /system/uuid from esx.conf on $computer_name");
+	}
+	else {
+		notify($ERRORS{'DEBUG'}, 0, "cleared /system/uuid from esx.conf on $computer_name");
+	}
+	
+	$self->execute('rm -f /etc/dhclient*leases /etc/dhclient-*.leases /var/lib/dhclient/dhclient*.leases');
+	return 1;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 _precapture_generalize_script
+
+ Parameters  : $interface_name, $portgroup
+ Returns     : BusyBox ash script string
+ Description : Guest-side Instant Clone-style vmk recreate + DHCP. Intended
+               to run detached (SIGHUP ignored) so the capture SSH session
+               can close before the management NIC is destroyed.
+
+=cut
+
+sub _precapture_generalize_script {
+	my $self = shift;
+	my $interface_name = shift || 'vmk0';
+	my $portgroup = shift || 'Management Network';
+	
+	$interface_name =~ s/[^A-Za-z0-9]//g;
+	$interface_name = 'vmk0' if $interface_name !~ /^vmk\d+$/;
+	$portgroup =~ s/[^A-Za-z0-9 _.-]//g;
+	$portgroup = 'Management Network' if !length($portgroup);
+	
+	return <<'SCRIPT_TOP' . <<"SCRIPT_VARS" . <<'SCRIPT_BODY';
+#!/bin/sh
+# VCL nested ESXi pre_capture generalize.
+# Runs detached: the MN SSH session must not be the process that removes vmk0.
+trap '' HUP
+log() { echo "VCL_ESXI_PRECAPTURE: $*"; }
+uname_s=$(uname -a 2>/dev/null)
+log "begin $uname_s"
+SCRIPT_TOP
+INTERFACE='$interface_name'
+PORTGROUP='$portgroup'
+SCRIPT_VARS
+# Give the MN time to close SSH cleanly before the management NIC goes away.
+sleep 5
+
+# Recreate last so FollowHardwareMac/UUID (set over SSH) are already on disk.
+# Portgroup is parsed on the MN before this script starts. Empty -> default.
+if [ -z "$PORTGROUP" ]; then
+	PORTGROUP="Management Network"
+	log "portgroup empty, defaulting to Management Network"
+else
+	log "$INTERFACE portgroup=$PORTGROUP"
+fi
+
+log "recreating $INTERFACE (Instant Clone style) pg=$PORTGROUP then DHCP"
+localcli network ip interface set -e false -i "$INTERFACE" || true
+localcli network ip interface remove -i "$INTERFACE" || true
+
+if ! localcli network ip interface add -i "$INTERFACE" -p "$PORTGROUP"; then
+	log "add with parsed portgroup failed, trying Management Network then VM Network"
+	localcli network ip interface add -i "$INTERFACE" -p "Management Network" || localcli network ip interface add -i "$INTERFACE" -p "VM Network" || {
+		log "failed to re-add $INTERFACE"
+		exit 1
+	}
+fi
+
+if localcli network ip interface ipv4 set -i "$INTERFACE" -t dhcp; then
+	log "set $INTERFACE dhcp"
+else
+	esxcli network ip interface ipv4 set --interface-name="$INTERFACE" --type=dhcp || log "failed to set DHCP on $INTERFACE"
+fi
+
+rm -f /etc/dhclient*leases /etc/dhclient-*.leases /var/lib/dhclient/dhclient*.leases 2>/dev/null || true
+
+# Flush esx.conf so a subsequent hypervisor power_off keeps the generalized NIC.
+if [ -x /sbin/auto-backup.sh ]; then
+	/sbin/auto-backup.sh >/dev/null 2>&1 || log "auto-backup.sh skipped"
+else
+	log "auto-backup.sh not present"
+fi
+
+# After auto-backup so the bootbank has the new vmk0/DHCP, drop UUID from the
+# live esx.conf. hostd may rewrite it; this matches nested-ESXi clone prep.
+sed -i 's#/system/uuid.*##' /etc/vmware/esx.conf 2>/dev/null || true
+
+sleep 3
+log "done"
+localcli network ip interface ipv4 get 2>/dev/null || true
+touch /scratch/vcl-precapture-generalize.done
+exit 0
+SCRIPT_BODY
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 _generalize_management_vmkernel
+
+ Parameters  : $interface_name (optional, default vmk0)
+ Returns     : boolean (true if the detached vmk recreate script was launched)
+ Description : Capture-time nested ESXi generalize over SSH.
+               Complementary to _bootstrap_nested_management_network (load-time
+               GuestOps, static reservation IP). This path:
+
+                 1. Enables /Net/FollowHardwareMac (SSH stays up)
+                 2. Scrubs /system/uuid and dhclient leases (SSH stays up)
+                 3. Persists with auto-backup.sh
+                 4. Launches a detached Instant Clone-style disable/remove/
+                    re-add of the management VMkernel on the same portgroup,
+                    then DHCP
+
+               Recreating the NIC is what actually drops the baked MAC/IP from
+               esx.conf; DHCP-only does not. The recreate is detached because
+               removing vmk0 kills the capture SSH session. shutdown() later
+               falls back to provisioner power_off if SSH does not return.
+
+=cut
+
+sub _generalize_management_vmkernel {
+	my $self = shift;
+	if (ref($self) !~ /VCL::Module/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	
+	my $interface_name = shift || 'vmk0';
+	if ($interface_name !~ /^vmk\d+$/) {
+		notify($ERRORS{'WARNING'}, 0, "refusing to generalize invalid VMkernel name '$interface_name', defaulting to vmk0");
+		$interface_name = 'vmk0';
+	}
+	
+	my $computer_name = $self->data->get_computer_node_name();
+	notify($ERRORS{'OK'}, 0, "generalizing nested ESXi management VMkernel $interface_name on $computer_name (capture-time; complementary to post_load GuestOps)");
+	
+	# --- SSH-safe steps (do not destroy the management NIC yet) ---
+	$self->_enable_follow_hardware_mac();
+	$self->_scrub_esxi_capture_identity();
+	
+	my $portgroup = $self->_get_vmkernel_portgroup($interface_name) || 'Management Network';
+	notify($ERRORS{'DEBUG'}, 0, "will recreate $interface_name on portgroup '$portgroup'");
+	
+	my ($backup_exit, $backup_output) = $self->execute('/sbin/auto-backup.sh');
+	if (!defined($backup_output) || (defined($backup_exit) && $backup_exit ne '0')) {
+		notify($ERRORS{'DEBUG'}, 0, "auto-backup.sh before vmk recreate returned " . (defined($backup_exit) ? $backup_exit : 'undef') . " on $computer_name");
+	}
+	else {
+		notify($ERRORS{'DEBUG'}, 0, "persisted FollowHardwareMac/UUID via auto-backup.sh on $computer_name");
+	}
+	
+	# --- Destructive step: recreate vmkN detached so this SSH session can close ---
+	my $script_path = '/scratch/vcl-precapture-generalize.sh';
+	my $log_path = '/scratch/vcl-precapture-generalize.log';
+	my $done_path = '/scratch/vcl-precapture-generalize.done';
+	my $script = $self->_precapture_generalize_script($interface_name, $portgroup);
+	
+	$self->execute("rm -f $done_path $log_path");
+	if (!$self->create_text_file($script_path, $script)) {
+		notify($ERRORS{'WARNING'}, 0, "failed to write $script_path on $computer_name; skipping vmk recreate (FollowHardwareMac/DHCP still apply)");
+		return;
+	}
+	$self->execute("chmod 755 $script_path");
+	
+	# trap '' HUP in both the wrapper and the script: ESXi SSH sends SIGHUP
+	# when the capture session closes, which would otherwise kill the recreate.
+	my $launch = "/bin/sh -c 'trap \"\" HUP; /bin/sh $script_path >$log_path 2>&1 </dev/null &' ; echo VCL_ESXI_PRECAPTURE_LAUNCHED";
+	my ($launch_exit, $launch_output) = $self->execute($launch, 0);
+	if (!defined($launch_output) || !grep(/VCL_ESXI_PRECAPTURE_LAUNCHED/, @$launch_output)) {
+		notify($ERRORS{'WARNING'}, 0, "failed to launch detached vmk generalize script on $computer_name; skipping recreate");
+		return;
+	}
+	
+	notify($ERRORS{'OK'}, 0, "launched detached $interface_name recreate+DHCP on $computer_name; waiting for it to finish (SSH may drop)");
+	
+	# Script: sleep 5 + disable/remove/add/dhcp + auto-backup + sleep 3.
+	# Do not call enable_dhcp during this window or we race the recreate.
+	sleep 15;
+	
+	if ($self->wait_for_ssh(45, 5)) {
+		for my $attempt (1 .. 6) {
+			last if $self->file_exists($done_path, 0);
+			notify($ERRORS{'DEBUG'}, 0, "waiting for $done_path on $computer_name (attempt $attempt/6)");
+			sleep 2;
+		}
+		my ($log_exit, $log_output) = $self->execute("cat $log_path", 0);
+		if (defined($log_output) && @$log_output) {
+			notify($ERRORS{'OK'}, 0, "vmk generalize log on $computer_name:\n" . join("\n", @$log_output));
+			if (grep(/VCL_ESXI_PRECAPTURE: failed to re-add/, @$log_output)) {
+				notify($ERRORS{'WARNING'}, 0, "detached generalize script failed to re-add $interface_name on $computer_name");
+				return;
+			}
+		}
+		delete $self->{network_configuration};
+		delete $self->{private_interface_name};
+		notify($ERRORS{'OK'}, 0, "SSH returned after $interface_name recreate on $computer_name");
+		return 1;
+	}
+	
+	notify($ERRORS{'OK'}, 0, "SSH did not return after $interface_name recreate on $computer_name (DHCP may have issued a different address); guest script set DHCP and auto-backup, shutdown will use provisioner power_off if needed");
+	return 1;
 }
 
 #//////////////////////////////////////////////////////////////////////////////
