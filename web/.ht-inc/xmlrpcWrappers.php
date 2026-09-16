@@ -136,6 +136,38 @@ function XMLRPCgetImages() {
 
 ////////////////////////////////////////////////////////////////////////////////
 ///
+/// \fn xmlrpcIsAvailableFailure($rc, $imageid, $start, $end)
+///
+/// \param $rc - isAvailable return code (< 1)
+/// \param $imageid - requested image id
+/// \param $start - unix start timestamp
+/// \param $end - unix end timestamp
+///
+/// \return XML-RPC struct with status=notavailable plus errorcode/errormsg
+///
+/// \brief logs why isAvailable refused a request and returns a structured
+/// notavailable result so clients can tell -2 (maintenance) from 0 (no node)
+///
+////////////////////////////////////////////////////////////////////////////////
+function xmlrpcIsAvailableFailure($rc, $imageid, $start, $end) {
+	global $user;
+	$reasons = array(
+		-4 => 'IP address not available',
+		-3 => 'IP/MAC conflict with another reservation',
+		-2 => 'requested time is during a maintenance window',
+		-1 => 'concurrent license restriction',
+		0  => 'no computers available for the requested image/time',
+	);
+	$errormsg = array_key_exists($rc, $reasons) ? $reasons[$rc] : 'not available';
+	$uid = (isset($user['unityid']) ? $user['unityid'] : '?');
+	error_log("XMLRPC isAvailable rc=$rc ($errormsg) imageid=$imageid start=$start end=$end user=$uid");
+	return array('status' => 'notavailable',
+	             'errorcode' => (int)$rc,
+	             'errormsg' => $errormsg);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+///
 /// \fn XMLRPCaddRequest($imageid, $start, $length, $foruser, $nousercheck)
 ///
 /// \param $imageid - id of an image
@@ -235,7 +267,7 @@ function XMLRPCaddRequest($imageid, $start, $length, $foruser='',
 	if($rc < 1) {
 		addLogEntry($nowfuture, unixToDatetime($start),
 		            unixToDatetime($end), 0, $imageid);
-		return array('status' => 'notavailable');
+		return xmlrpcIsAvailableFailure($rc, $imageid, $start, $end);
 	}
 	$return['requestid']= addRequest(0, array(), (1 - $nousercheck));
 	$return['status'] = 'success';
@@ -356,7 +388,7 @@ function XMLRPCaddRequestWithEnding($imageid, $start, $end, $foruser='',
 	if($rc < 1) {
 		addLogEntry($nowfuture, unixToDatetime($start),
 		            unixToDatetime($end), 0, $imageid);
-		return array('status' => 'notavailable');
+		return xmlrpcIsAvailableFailure($rc, $imageid, $start, $end);
 	}
 	$return['requestid']= addRequest(0, array(), (1 - $nousercheck));
 	$return['status'] = 'success';
@@ -558,7 +590,7 @@ function XMLRPCdeployServer($imageid, $start, $end, $admingroup='',
 	if($rc < 1) {
 		addLogEntry($nowfuture, unixToDatetime($start),
 		            unixToDatetime($end), 0, $imageid);
-		return array('status' => 'notavailable');
+		return xmlrpcIsAvailableFailure($rc, $imageid, $start, $end);
 	}
 	$return['requestid']= addRequest();
 	$query = "UPDATE reservation "

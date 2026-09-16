@@ -3922,8 +3922,10 @@ sub get_default_imagemeta_info {
  Returns     : hash reference
  Description : Retrieves info from the database for the vmhost, vmprofile, and
                repository and datastore imagetypes. The $vmhost_identifier
-               argument may be used to match vmhost.id, vmprofile.profilename,
-               or computer.hostname.
+               argument may be used to match vmhost.id, vmhost.computerid
+               (numeric fallback), vmprofile.profilename, or computer.hostname.
+               computer.vmhostid is a FK to vmhost.id, but nested ESXi labs
+               sometimes store the metal host's computer.id there instead.
 
 =cut
 
@@ -3939,7 +3941,7 @@ sub get_vmhost_info {
 	
 	return $ENV->{vmhost_info}->{$vmhost_identifier} if (!$no_cache && $ENV->{vmhost_info}->{$vmhost_identifier});
 	
-	my $management_node_id = get_management_node_id();
+	my $management_node_id = get_management_node_id() || 0;
 	
 	# Get a hash ref containing the database column names
 	my $database_table_columns = get_database_table_columns();
@@ -3967,45 +3969,43 @@ sub get_vmhost_info {
 	# Remove the comma after the last column line
 	$select_statement =~ s/,$//;
 	
-	# Complete the select statement
+	# imagetype joins are LEFT so a stale repository/datastore imagetype id
+	# still returns vmhost + vmprofile (needed for nested ESXi GuestOps).
 	$select_statement .= <<EOF;
 FROM
-vmhost,
-vmprofile
+vmhost
+INNER JOIN vmprofile ON (vmprofile.id = vmhost.vmprofileid)
 LEFT JOIN (cryptsecret, cryptkey) ON (
 	vmprofile.secretid = cryptsecret.secretid AND
 	cryptsecret.cryptkeyid = cryptkey.id AND
 	cryptkey.hosttype = 'managementnode' AND
 	cryptkey.hostid = $management_node_id
-),
-imagetype repositoryimagetype,
-imagetype datastoreimagetype,
-computer
-
+)
+LEFT JOIN imagetype repositoryimagetype ON (vmprofile.repositoryimagetypeid = repositoryimagetype.id)
+LEFT JOIN imagetype datastoreimagetype ON (vmprofile.datastoreimagetypeid = datastoreimagetype.id)
+INNER JOIN computer ON (vmhost.computerid = computer.id)
 WHERE
-vmprofile.id = vmhost.vmprofileid
-AND vmprofile.repositoryimagetypeid = repositoryimagetype.id
-AND vmprofile.datastoreimagetypeid = datastoreimagetype.id
-AND vmhost.computerid = computer.id
-AND 
 EOF
 	
+	my @selected_rows;
 	if ($vmhost_identifier =~ /^\d+$/) {
-		$select_statement .= "vmhost.id = '$vmhost_identifier'\n";
+		@selected_rows = database_select($select_statement . "vmhost.id = '$vmhost_identifier'\n");
+		if (!@selected_rows) {
+			notify($ERRORS{'DEBUG'}, 0, "no vmhost.id=$vmhost_identifier, retrying as vmhost.computerid (computer.vmhostid may store the host computer.id)");
+			@selected_rows = database_select($select_statement . "vmhost.computerid = '$vmhost_identifier'\n");
+		}
 	}
 	else {
-		$select_statement .= "(\n";
-		$select_statement .= "   computer.hostname REGEXP '$vmhost_identifier(\\\\.|\$)'\n";
-		$select_statement .= "   OR vmprofile.profilename = '$vmhost_identifier'\n";
-		$select_statement .= ")";
+		my $name_where = "(\n";
+		$name_where .= "   computer.hostname REGEXP '$vmhost_identifier(\\\\.|\$)'\n";
+		$name_where .= "   OR vmprofile.profilename = '$vmhost_identifier'\n";
+		$name_where .= ")";
+		@selected_rows = database_select($select_statement . $name_where);
 	}
-	
-	# Call the database select subroutine
-	my @selected_rows = database_select($select_statement);
 
 	# Check to make sure 1 row was returned
 	if (scalar @selected_rows == 0) {
-		notify($ERRORS{'WARNING'}, 0, "zero rows were returned from database select statement:\n$select_statement");
+		notify($ERRORS{'WARNING'}, 0, "zero rows were returned from database select for VM host identifier $vmhost_identifier");
 		return;
 	}
 	
@@ -4013,8 +4013,12 @@ EOF
 	if (scalar @selected_rows > 1) {
 		my $vmhost_string;
 		for my $selected_row (@selected_rows) {
-			# Check if the vmprofile.profilename exactly matches the VM host identifier argument
-			if ($selected_row->{'vmprofile-profilename'} eq $vmhost_identifier) {
+			# Prefer an exact vmhost.id match, then exact profile name match
+			if ($vmhost_identifier =~ /^\d+$/ && $selected_row->{'vmhost-id'} eq $vmhost_identifier) {
+				$row = $selected_row;
+				last;
+			}
+			if (defined($selected_row->{'vmprofile-profilename'}) && $selected_row->{'vmprofile-profilename'} eq $vmhost_identifier) {
 				$row = $selected_row;
 				last;
 			}
@@ -4025,8 +4029,8 @@ EOF
 			$vmhost_string .= "\n";
 		}
 		if (!$row) {
-			notify($ERRORS{'WARNING'}, 0, "unable to determine VM host from ambiguous argument: $vmhost_identifier, " . scalar @selected_rows . " rows were returned from database select statement:\n$select_statement\nrows:\n$vmhost_string");
-			return;
+			$row = $selected_rows[0];
+			notify($ERRORS{'OK'}, 0, "multiple vmhost rows matched $vmhost_identifier, using vmhost id " . $row->{'vmhost-id'} . " computer id " . $row->{'vmhost-computerid'} . " profile " . ($row->{'vmprofile-profilename'} || '<empty>') . "\nrows:\n$vmhost_string");
 		}
 	}
 	else {
@@ -4058,7 +4062,9 @@ EOF
 	}
 	
 	# Get the vmhost computer info and add it to the hash
+	# in_get_vmhost_info prevents get_computer_info from recursively calling us
 	my $computer_id = $vmhost_info->{computerid};
+	local $ENV->{in_get_vmhost_info} = 1;
 	my $computer_info = get_computer_info($computer_id, $no_cache);
 	if ($computer_info) {
 		$vmhost_info->{computer} = $computer_info;
@@ -4113,13 +4119,16 @@ EOF
 	$vmhost_info->{vmprofile}{virtualdiskpath} = $vmhost_info->{vmprofile}{vmpath} if !$vmhost_info->{vmprofile}{virtualdiskpath};
 	
 	my $vmhost_id = $vmhost_info->{id};
+	my $profile_name = $vmhost_info->{vmprofile}{profilename} || '<empty>';
 	
-	notify($ERRORS{'DEBUG'}, 0, "retrieved VM host $vmhost_identifier info, VM host ID: $vmhost_id, computer: $vmhost_info->{computer}{hostname}, computer ID: $vmhost_info->{computer}{id}");
+	notify($ERRORS{'DEBUG'}, 0, "retrieved VM host $vmhost_identifier info, VM host ID: $vmhost_id, computer: " . ($vmhost_info->{computer}{hostname} || '<unknown>') . ", computer ID: " . ($vmhost_info->{computer}{id} || $computer_id) . ", profile: $profile_name");
 	$ENV->{vmhost_info}->{$vmhost_identifier} = $vmhost_info;
 	
-	
-	if ($vmhost_identifier ne $vmhost_id) {
+	if (defined($vmhost_id) && $vmhost_identifier ne $vmhost_id) {
 		$ENV->{vmhost_info}->{$vmhost_id} = $vmhost_info;
+	}
+	if (defined($computer_id) && $vmhost_identifier ne $computer_id && (!defined($vmhost_id) || $computer_id ne $vmhost_id)) {
+		$ENV->{vmhost_info}->{$computer_id} = $vmhost_info;
 	}
 	
 	return $ENV->{vmhost_info}->{$vmhost_identifier};
@@ -7141,14 +7150,21 @@ EOF
 	
 	# Check if the computer associated with this reservation has a vmhostid set
 	if (my $vmhost_id = $computer_info->{vmhostid}) {
-		if ($calling_subroutine !~ /(get_vmhost_info)/) {
+		if (!$ENV->{in_get_vmhost_info} && $calling_subroutine !~ /(get_vmhost_info)/) {
 			my $vmhost_info = get_vmhost_info($vmhost_id, $no_cache);
 			
 			if ($vmhost_info) {
 				$computer_info->{vmhost} = $vmhost_info;
+				my $profile_name = $vmhost_info->{vmprofile}{profilename};
+				my $host_computer_id = $vmhost_info->{computerid};
+				my $host_hostname = $vmhost_info->{computer}{hostname} || '';
+				notify($ERRORS{'DEBUG'}, 0, "$computer_hostname vmhostid=$vmhost_id resolved to vmhost.id=" . ($vmhost_info->{id} || '?') . " computerid=$host_computer_id hostname=$host_hostname profile=" . ($profile_name || '<empty>'));
+				if (defined($host_computer_id) && $host_computer_id == $computer_id && ($computer_info->{type} || '') eq 'virtualmachine') {
+					notify($ERRORS{'WARNING'}, 0, "$computer_hostname (id $computer_id) vmhostid=$vmhost_id resolved to this same VM; nested ESXi guests must set computer.vmhostid to the metal vmhost.id (or metal computer.id), not this computer");
+				}
 			}
 			else {
-				notify($ERRORS{'WARNING'}, 0, "vmhostid $vmhost_id is set for $computer_hostname but the vmhost info could not be retrieved");
+				notify($ERRORS{'WARNING'}, 0, "vmhostid $vmhost_id is set for $computer_hostname but the vmhost info could not be retrieved (tried vmhost.id then vmhost.computerid)");
 			}
 		}
 		else {
@@ -7173,9 +7189,14 @@ EOF
 	}
 	
 	notify($ERRORS{'DEBUG'}, 0, "retrieved info for computer: $computer_hostname ($computer_id)");
-	$ENV->{computer_info}->{$computer_identifier} = $computer_info;
-	$ENV->{computer_info}->{$computer_identifier}->{RETRIEVAL_TIME} = time;
-	return $ENV->{computer_info}->{$computer_identifier};
+	# Do not cache a computer hash whose vmhost subtree was skipped for recursion;
+	# the outer get_computer_info call will store the complete structure.
+	unless ($computer_info->{vmhostid} && $ENV->{in_get_vmhost_info}) {
+		$ENV->{computer_info}->{$computer_identifier} = $computer_info;
+		$ENV->{computer_info}->{$computer_identifier}->{RETRIEVAL_TIME} = time;
+		return $ENV->{computer_info}->{$computer_identifier};
+	}
+	return $computer_info;
 }
 
 #//////////////////////////////////////////////////////////////////////////////

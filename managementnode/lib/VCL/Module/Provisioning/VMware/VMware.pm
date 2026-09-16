@@ -335,7 +335,10 @@ sub initialize {
 	
 	my $vmware_api;
 	
-	notify($ERRORS{'DEBUG'}, 0, "VM profile assigned to $vmhost_computer_name: $vmprofile_name");
+	notify($ERRORS{'DEBUG'}, 0, "VM profile assigned to $vmhost_computer_name: " . (defined($vmprofile_name) && length($vmprofile_name) ? $vmprofile_name : '<empty>'));
+	if (!defined($vmprofile_name) || !length($vmprofile_name)) {
+		notify($ERRORS{'WARNING'}, 0, "VM profile name is empty for VM host $vmhost_computer_name (computer id " . ($vmhost_computer_id || '<undef>') . "); provisioning will not be able to use the metal host SDK/SSH");
+	}
 	
 	# Create an API object which will be used to control the VM (register, power on, etc.)
 	if ($vmprofile_password && ($vmware_api = $self->get_vmhost_api_object($VSPHERE_SDK_PACKAGE)) && !$vmware_api->is_restricted()) {
@@ -1411,6 +1414,18 @@ sub get_vmhost_datastructure {
 	my $reservation_id = $self->data->get_reservation_id();
 	my $vmhost_computer_id = $self->data->get_vmhost_computer_id();
 	my $vmhost_profile_image_id = $self->data->get_vmhost_profile_image_id();
+	my $reservation_computer_id = $self->data->get_computer_id(0);
+	my $reservation_computer_type = $self->data->get_computer_type(0);
+	my $reservation_computer_name = $self->data->get_computer_short_name(0) || '<unknown>';
+	
+	if (!$vmhost_computer_id) {
+		notify($ERRORS{'WARNING'}, 0, "unable to create DataStructure object for VM host: computer.vmhost.computerid is not set for $reservation_computer_name (vmprofile empty). computer.vmhostid must be the metal vmhost.id or metal computer.id, not this guest.");
+		return;
+	}
+	if ($reservation_computer_id && $vmhost_computer_id == $reservation_computer_id && ($reservation_computer_type || '') eq 'virtualmachine') {
+		notify($ERRORS{'WARNING'}, 0, "refusing to treat guest $reservation_computer_name (id $reservation_computer_id) as its own VM host; computer.vmhostid does not point at the metal hypervisor");
+		return;
+	}
 	
 	# Create a DataStructure object containing computer data for the VM host
 	my $vmhost_data;
