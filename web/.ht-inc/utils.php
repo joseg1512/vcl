@@ -4325,8 +4325,13 @@ function processInputData($data, $type, $addslashes=0, $defaultvalue=NULL) {
 		}
 	}
 	elseif(! empty($return) && $type == ARG_STRING) {
-		if(! is_string($return))
-			$return = $defaultvalue;
+		if(! is_string($return)) {
+			# XML-RPC <int>/<i8> timestamps must stay usable as ARG_STRING
+			if(is_numeric($return))
+				$return = (string)$return;
+			else
+				$return = $defaultvalue;
+		}
 	}
 	elseif(! empty($return) && $type == ARG_MULTINUMERIC) {
 		foreach($return as $index => $value) {
@@ -4851,7 +4856,8 @@ function isAvailable($images, $imageid, $imagerevisionid, $start, $end,
 	elseif(empty($imagerevisionid))
 		$imagerevisionid = array($imageid => array(getProductionRevisionid($imageid)));
 
-	if(schCheckMaintenance($start, $end))
+	$maint = schCheckMaintenance($start, $end);
+	if($maint === true)
 		return debugIsAvailable(-2, 1, $start, $end, $imagerevisionid);
 
 	if(! array_key_exists($imageid, $images))
@@ -4867,6 +4873,10 @@ function isAvailable($images, $imageid, $imagerevisionid, $start, $end,
 	}
 
 	$scheduleids = getAvailableSchedules($start, $end);
+	if(empty($scheduleids)) {
+		error_log("isAvailable: no schedule covers requested window start=$start (" . unixToDatetime($start) . ") end=$end (" . unixToDatetime($end) . ")");
+		return debugIsAvailable(0, 21, $start, $end, $imagerevisionid);
+	}
 
 	$requestInfo["computers"] = array();
 	$requestInfo["computers"][0] = 0;
@@ -5117,7 +5127,11 @@ function isAvailable($images, $imageid, $imagerevisionid, $start, $end,
 			#image.OSid->OS.installtype->OSinstalltype.id->provisioningOSinstalltype.provisioningid->computer.provisioningid
 			$query = "SELECT DISTINCT c.id, "
 			       .                 "c.currentimageid, "
-			       .                 "c.imagerevisionid "
+			       .                 "c.imagerevisionid, "
+			       .                 "c.RAM, "
+			       .                 "c.procspeed, "
+			       .                 "c.procnumber, "
+			       .                 "c.network "
 			       . "FROM state s, "
 			       .      "image i "
 			       . "LEFT JOIN OS o ON (o.id = i.OSid) "
@@ -5141,9 +5155,9 @@ function isAvailable($images, $imageid, $imagerevisionid, $start, $end,
 			$query .=      "c.id IN ($mappedcomputers) AND "
 			       .       "c.id NOT IN ($alloccompids) AND "
 			       .       "(se.expires IS NULL OR se.expires < NOW()) "
-			       . "ORDER BY RAM, "
+			       . "ORDER BY c.RAM, "
 			       .          "(c.procspeed * c.procnumber), "
-			       .          "network";
+			       .          "c.network";
 
 			$qh = doQuery($query, 129);
 			while($row = mysqli_fetch_assoc($qh)) {
@@ -5236,13 +5250,17 @@ function isAvailable($images, $imageid, $imagerevisionid, $start, $end,
 				       . "LEFT JOIN computer c2 ON (v.id = c2.vmhostid) "
 				       . "LEFT JOIN image i ON (c2.currentimageid = i.id) "
 				       . "WHERE c.stateid = 20 "
-				       . "GROUP BY v.id";
+				       . "GROUP BY v.id, c.RAM";
 				doQuery($query, 101);
 			}
 
 			$inids = implode(',', $computerids);
 			// if want overbooking, modify the last part of the WHERE clause
-			$query = "SELECT c.id "
+			$query = "SELECT c.id, "
+			       .        "c.RAM, "
+			       .        "c.procspeed, "
+			       .        "c.procnumber, "
+			       .        "c.network "
 			       . "FROM VMhostCheck v "
 			       . "LEFT JOIN computer c ON (v.vmhostid = c.vmhostid) "
 			       . "LEFT JOIN image i ON (c.currentimageid = i.id) "
@@ -5382,8 +5400,17 @@ function debugIsAvailable($rc, $loc, $start, $end, $imagerevisionid,
 	                       $compids=array(), $currentids=array(),
 	                       $blockids=array(), $failedids=array(), $virtual='') {
 	global $mode, $requestInfo;
+	if($rc < 1) {
+		$ncomp = is_array($compids) ? count($compids) : 0;
+		$ncur = is_array($currentids) ? count($currentids) : 0;
+		$nblock = is_array($blockids) ? count($blockids) : 0;
+		error_log("isAvailable rc=$rc loc=$loc start=$start end=$end " .
+		          "computers=$ncomp current=$ncur block=$nblock virtual=$virtual " .
+		          "mode=" . (isset($mode) ? $mode : ''));
+	}
 	$debug = getContinuationVar('debug', 0);
 	if(! $debug ||
+	   ! isset($mode) ||
 	   $mode != 'AJupdateWaitTime' ||
 	   ! checkUserHasPerm('View Debug Information'))
 		return $rc;
@@ -5543,18 +5570,41 @@ function getImagePlatform($imageid) {
 ///
 ////////////////////////////////////////////////////////////////////////////////
 function schCheckMaintenance($start, $end) {
-	$startdt = unixToDatetime($start);
-	$enddt = unixToDatetime($end);
-	$query = "SELECT id "
+	# Compare using MySQL UNIX_TIMESTAMP() so PHP timezone vs session
+	# timezone cannot make an empty sitemaintenance table look like a hit,
+	# and so real windows still match regardless of date_default_timezone.
+	$start = (int)$start;
+	$end = (int)$end;
+	if($start <= 0 || $end <= 0) {
+		error_log("schCheckMaintenance: invalid window start=$start end=$end; treating as no maintenance");
+		return false;
+	}
+	$query = "SELECT id, start, end, allowreservations "
 	       . "FROM sitemaintenance "
-	       . "WHERE ((allowreservations = 0 AND "
-	       .       "(('$enddt' > start) AND ('$startdt' < end))) OR "
-	       .       "(('$startdt' > (start - INTERVAL 30 MINUTE)) AND ('$startdt' < end))) AND "
-	       .       "end > NOW()";
+	       . "WHERE end > NOW() AND "
+	       .       "((allowreservations = 0 AND "
+	       .       "  $end > UNIX_TIMESTAMP(start) AND "
+	       .       "  $start < UNIX_TIMESTAMP(end)) OR "
+	       .       " ($start > UNIX_TIMESTAMP(start) - 1800 AND "
+	       .       "  $start < UNIX_TIMESTAMP(end)))";
 	$qh = doQuery($query, 101);
-	if($row = mysqli_fetch_row($qh))
-		return true;
-	return false;
+	if(! is_object($qh) || ! ($qh instanceof mysqli_result)) {
+		error_log("schCheckMaintenance: query did not return a result set");
+		return false;
+	}
+	$nrows = mysqli_num_rows($qh);
+	if($nrows < 1)
+		return false;
+	$row = mysqli_fetch_assoc($qh);
+	if(! is_array($row) || empty($row['id'])) {
+		error_log("schCheckMaintenance: mysqli_num_rows=$nrows but no id row; treating as no maintenance");
+		return false;
+	}
+	error_log("schCheckMaintenance: conflict sitemaintenance id={$row['id']} " .
+	          "start={$row['start']} end={$row['end']} " .
+	          "allowreservations={$row['allowreservations']} " .
+	          "requested unix $start..$end rows=$nrows");
+	return true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -7197,7 +7247,7 @@ function datetimeToUnix($datetime) {
 ///
 ////////////////////////////////////////////////////////////////////////////////
 function unixToDatetime($timestamp) {
-	return date("Y-m-d H:i:s", $timestamp);
+	return date("Y-m-d H:i:s", (int)$timestamp);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -12252,7 +12302,8 @@ function timeToNextReservation($request) {
 ///
 ////////////////////////////////////////////////////////////////////////////////
 function weekOfYear($ts) {
-	$year = date('Y', time());
+	$year = date('Y', $ts);
+	$add = 0;
 	for($i = 0; $i < 7; $i++) {
 		$time = mktime(1, 0, 0, 1, $i + 1, $year);
 		if(date('l', $time) == "Sunday") {
