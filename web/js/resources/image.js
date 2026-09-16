@@ -124,6 +124,7 @@ function inlineEditResourceCB(data, ioArgs) {
 			dojo.addClass('sethostnamediv', 'hidden');
 		dojo.byId('connectmethodlist').innerHTML = data.items.data.connectmethods.join('<br>');
 		dijit.byId('connectmethodttd').set('href', data.items.data.connectmethodurl);
+		setAdditionalDisks(data.items.data.additionaldisks);
 		if(data.items.data.ostype == 'windows') {
 			dojo.removeClass('imageadauthbox', 'hidden');
 			if('addomainvals' in data.items.data)
@@ -172,6 +173,7 @@ function initAddDialog() {
 	if(dijit.byId('addomainid').options.length == 0) {
 		dijit.byId('adauthenable').set('disabled', true);
 	}
+	resetAdditionalDisks();
 }
 
 function delayedEditResize() {
@@ -207,6 +209,7 @@ function resetEditResource() {
 	dijit.byId('adauthenable').reset();
 	dijit.byId('addomainid').reset();
 	dijit.byId('baseou').reset();
+	resetAdditionalDisks();
 }
 
 function saveResource() {
@@ -270,6 +273,8 @@ function saveResource() {
 		setTimeout(function() {dijit.byId('baseou').focus();}, 300);
 		return;
 	}
+	if(! validateAdditionalDisks(errobj))
+		return;
 
 	if(dojo.byId('editresid').value == 0)
 		var data = {continuation: dojo.byId('addresourcecont').value};
@@ -350,6 +355,14 @@ function saveResource() {
 		data['adauthenabled'] = 0;
 		data['addomainid'] = 0;
 		data['baseou'] = '';
+	}
+	if(dijit.byId('additionaldisksenable').checked) {
+		data['additionaldisksenabled'] = 1;
+		data['adddisksizes'] = getAdditionalDiskSizes().join(',');
+	}
+	else {
+		data['additionaldisksenabled'] = 0;
+		data['adddisksizes'] = '';
 	}
 
 	submitbtn.set('disabled', true);
@@ -442,6 +455,7 @@ function saveResourceCB(data, ioArgs) {
 			delete dijit.byId('addomainid').extraaddomainou;
 		}
 		dijit.registry.filter(function(widget, index){return widget.id.match(/^comments/);}).forEach(function(widget) {widget.destroy();});
+		resetAdditionalDisks();
 		setTimeout(function() {dijit.byId('addeditbtn').set('disabled', false);}, 250);
 	}
 }
@@ -920,4 +934,124 @@ function selectADauth() {
 	else if(dijit.byId('adauthenable').checked) {
 		dijit.byId('baseou').set('disabled', false);
 	}
+}
+
+var additionalDiskCount = 1;
+
+function toggleAdditionalDisks() {
+	if(dijit.byId('additionaldisksenable').checked) {
+		dojo.removeClass('additionaldisksrows', 'hidden');
+		if(additionalDiskCount < 1)
+			additionalDiskCount = 1;
+		updateAdditionalDiskRows();
+	}
+	else {
+		dojo.addClass('additionaldisksrows', 'hidden');
+	}
+	delayedEditResize();
+}
+
+function updateAdditionalDiskRows() {
+	for(var i = 1; i <= 10; i++) {
+		if(i <= additionalDiskCount)
+			dojo.removeClass('adddiskrow' + i, 'hidden');
+		else {
+			dojo.addClass('adddiskrow' + i, 'hidden');
+			if(dijit.byId('adddisksize' + i))
+				dijit.byId('adddisksize' + i).reset();
+		}
+	}
+	var addbtn = dojo.byId('adddiskaddbtn');
+	var rembtn = dojo.byId('adddiskremovebtn');
+	if(addbtn)
+		addbtn.disabled = (additionalDiskCount >= 10);
+	if(rembtn)
+		rembtn.disabled = (additionalDiskCount <= 1);
+}
+
+function addAdditionalDiskRow() {
+	if(additionalDiskCount >= 10)
+		return;
+	additionalDiskCount++;
+	updateAdditionalDiskRows();
+	delayedEditResize();
+}
+
+function removeAdditionalDiskRow() {
+	if(additionalDiskCount <= 1)
+		return;
+	additionalDiskCount--;
+	updateAdditionalDiskRows();
+	delayedEditResize();
+}
+
+function resetAdditionalDisks() {
+	additionalDiskCount = 1;
+	if(dijit.byId('additionaldisksenable'))
+		dijit.byId('additionaldisksenable').set('checked', false);
+	for(var i = 1; i <= 10; i++) {
+		if(dijit.byId('adddisksize' + i))
+			dijit.byId('adddisksize' + i).reset();
+	}
+	updateAdditionalDiskRows();
+	if(dojo.byId('additionaldisksrows'))
+		dojo.addClass('additionaldisksrows', 'hidden');
+}
+
+function setAdditionalDisks(disks) {
+	resetAdditionalDisks();
+	if(! disks || ! disks.length)
+		return;
+	additionalDiskCount = Math.min(disks.length, 10);
+	for(var i = 0; i < additionalDiskCount; i++) {
+		var size = parseInt(disks[i].sizegb, 10);
+		if(isNaN(size) || size < 1)
+			size = 1;
+		if(size > 4096)
+			size = 4096;
+		dijit.byId('adddisksize' + (i + 1)).set('value', size);
+	}
+	dijit.byId('additionaldisksenable').set('checked', true);
+	toggleAdditionalDisks();
+}
+
+function validateAdditionalDisks(errobj) {
+	if(! dijit.byId('additionaldisksenable') || ! dijit.byId('additionaldisksenable').checked)
+		return true;
+	if(additionalDiskCount < 1) {
+		errobj.innerHTML = _('Additional disks must include at least one disk');
+		if(! dijit.byId('advancedoptions').open)
+			dijit.byId('advancedoptions').toggle();
+		return false;
+	}
+	for(var i = 1; i <= additionalDiskCount; i++) {
+		if(! checkValidatedObj('adddisksize' + i, errobj)) {
+			if(! dijit.byId('advancedoptions').open)
+				dijit.byId('advancedoptions').toggle();
+			(function(idx) {
+				setTimeout(function() {dijit.byId('adddisksize' + idx).focus();}, 300);
+			})(i);
+			return false;
+		}
+		var size = parseInt(dijit.byId('adddisksize' + i).get('value'), 10);
+		if(isNaN(size) || size < 1 || size > 4096) {
+			errobj.innerHTML = _('Each additional disk size must be between 1 and 4096 GB');
+			if(! dijit.byId('advancedoptions').open)
+				dijit.byId('advancedoptions').toggle();
+			(function(idx) {
+				setTimeout(function() {dijit.byId('adddisksize' + idx).focus();}, 300);
+			})(i);
+			return false;
+		}
+	}
+	return true;
+}
+
+function getAdditionalDiskSizes() {
+	var sizes = [];
+	if(! dijit.byId('additionaldisksenable') || ! dijit.byId('additionaldisksenable').checked)
+		return sizes;
+	for(var i = 1; i <= additionalDiskCount; i++)
+		sizes.push(parseInt(dijit.byId('adddisksize' + i).get('value'), 10));
+	return sizes;
 }

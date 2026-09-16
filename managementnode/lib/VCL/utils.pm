@@ -152,6 +152,7 @@ our @EXPORT = qw(
 	get_file_size_info_string
 	get_group_name
 	get_image_active_directory_domain_info
+	get_image_additional_disk_info
 	get_image_info
 	get_imagemeta_info
 	get_imagerevision_cleanup_info
@@ -3491,10 +3492,57 @@ EOF
 	my $domain_info = get_image_active_directory_domain_info($image_id, $no_cache);
 	$image_info->{imagedomain} = $domain_info;
 	
+	$image_info->{additionaldisks} = get_image_additional_disk_info($image_id);
+	
 	#notify($ERRORS{'DEBUG'}, 0, "retrieved info for image '$image_identifier':\n" . format_data($image_info));
 	$ENV->{image_info}->{$image_identifier} = $image_info;
 	$ENV->{image_info}->{$image_identifier}->{RETRIEVAL_TIME} = time;
 	return $ENV->{image_info}->{$image_identifier};
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 get_image_additional_disk_info
+
+ Parameters  : $image_id
+ Returns     : array reference
+ Description : Returns additional empty disks configured for an image. Each
+               element is a hash containing sequence and sizegb. Returns an
+               empty array reference if none are configured.
+
+=cut
+
+sub get_image_additional_disk_info {
+	my ($image_id) = @_;
+	my @disks;
+	if (!defined($image_id) || $image_id !~ /^\d+$/) {
+		return \@disks;
+	}
+	
+	my $select_statement = <<EOF;
+SELECT
+imageadditionaldisk.sequence,
+imageadditionaldisk.sizegb
+FROM
+imageadditionaldisk
+WHERE
+imageadditionaldisk.imageid = $image_id
+ORDER BY
+imageadditionaldisk.sequence
+EOF
+	
+	my @selected_rows = database_select($select_statement);
+	for my $row (@selected_rows) {
+		my $sequence = $row->{sequence};
+		my $sizegb = $row->{sizegb};
+		next unless defined($sequence) && $sequence =~ /^\d+$/ && $sequence >= 1 && $sequence <= 10;
+		next unless defined($sizegb) && $sizegb =~ /^\d+$/ && $sizegb >= 1;
+		push @disks, {
+			sequence => $sequence + 0,
+			sizegb => $sizegb + 0,
+		};
+	}
+	return \@disks;
 }
 
 #//////////////////////////////////////////////////////////////////////////////

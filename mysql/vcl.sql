@@ -526,6 +526,22 @@ CREATE TABLE IF NOT EXISTS `imageaddomain` (
 -- --------------------------------------------------------
 
 -- 
+-- Table structure for table `imageadditionaldisk`
+-- 
+
+CREATE TABLE IF NOT EXISTS `imageadditionaldisk` (
+  `id` smallint(5) unsigned NOT NULL auto_increment,
+  `imageid` smallint(5) unsigned NOT NULL,
+  `sequence` tinyint(3) unsigned NOT NULL,
+  `sizegb` smallint(5) unsigned NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `imageid_sequence` (`imageid`,`sequence`),
+  KEY `imageid` (`imageid`)
+) ENGINE=InnoDB DEFAULT CHARSET=latin1;
+
+-- --------------------------------------------------------
+
+-- 
 -- Table structure for table `imagemeta`
 -- 
 
@@ -2470,6 +2486,11 @@ ALTER TABLE `image` ADD CONSTRAINT FOREIGN KEY (`OSid`) REFERENCES `OS` (`id`) O
 ALTER TABLE `image` ADD CONSTRAINT FOREIGN KEY (`imagetypeid`) REFERENCES `imagetype` (`id`) ON UPDATE CASCADE;
 ALTER TABLE `image` ADD CONSTRAINT FOREIGN KEY (`imagemetaid`) REFERENCES `imagemeta` (`id`) ON DELETE SET NULL ON UPDATE CASCADE;
 ALTER TABLE `image` ADD CONSTRAINT FOREIGN KEY (`basedoffrevisionid`) REFERENCES `imagerevision` (`id`) ON UPDATE CASCADE;
+
+-- 
+-- Constraints for table `imageadditionaldisk`
+-- 
+ALTER TABLE `imageadditionaldisk` ADD CONSTRAINT FOREIGN KEY (`imageid`) REFERENCES `image` (`id`) ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- 
 -- Constraints for table `imagerevision`

@@ -655,6 +655,14 @@ body {
 	margin: 3px 1px;
 }
 
+.adddiskrow {
+	margin: 2px 0;
+}
+
+#adddiskbtns {
+	margin: 4px 0 2px 0;
+}
+
 #imageRevisionDlg .dijitDialogPaneContent {
 	height: 100%;
 	width: 100%;

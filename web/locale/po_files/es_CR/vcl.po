@@ -5093,6 +5093,38 @@ msgstr "Dominio AD"
 msgid "Base OU"
 msgstr "Base OU"
 
+#: image.php:406
+msgid "Additional disks"
+msgstr "Discos adicionales"
+
+#: image.php:412
+msgid "Disk"
+msgstr "Disco"
+
+#: image.php:418
+msgid "Add disk"
+msgstr "Agregar disco"
+
+#: image.php:420
+msgid "Remove disk"
+msgstr "Quitar disco"
+
+#: image.php:553
+msgid ""
+"If checked, empty disks are attached when the image is loaded. They are not "
+"stored in the captured image and are recreated empty on each load or reload."
+msgstr ""
+"Si está marcado, se adjuntan discos vacíos al cargar la imagen. No se "
+"almacenan en la imagen capturada y se recrean vacíos en cada carga o recarga."
+
+#: image.php:1840
+msgid "Additional disks must include between 1 and 10 disks"
+msgstr "Los discos adicionales deben incluir entre 1 y 10 discos"
+
+#: image.php:1846
+msgid "Each additional disk size must be an integer between 1 and 65535 GB"
+msgstr "El tamaño de cada disco adicional debe ser un entero entre 1 y 65535 GB"
+
 #: image.php:352
 msgid ""
 "Name cannot contain single (') or double (&quot;) quotes, less than (&lt;), "
