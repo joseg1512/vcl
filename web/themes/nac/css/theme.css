@@ -96,7 +96,8 @@ h4 {
 		font-size: 0.85em;
 	}
 	img.header-logo {
-		height: 48px;
+		height: 52px;
+		max-width: 120px;
 	}
 	h1.site-title {
 		font-size: 1.25em;
@@ -421,8 +422,10 @@ img.header-logo {
 	float: left;
 	padding-right: 1em;
 	vertical-align: middle;
-	height: 64px;
+	height: 72px;
 	width: auto;
+	max-width: 160px;
+	object-fit: contain;
 }
 h1.site-title {
 	line-height: 1.15em;
