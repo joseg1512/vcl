@@ -2375,6 +2375,38 @@ sub getpw {
 		$password .= $character_set[$random_index];
 	}
 
+	# Guarantee at least one digit, one uppercase and one lowercase character,
+	# placed where they count. ESXi (pam_passwdqc) does not count an uppercase
+	# character that begins a password or a digit that ends a password towards
+	# the number of character classes, so the guaranteed characters are never
+	# placed in those positions:
+	# "Weak password: not enough different characters or classes"
+	if ($password_length >= 3) {
+		my @digits = ('3' .. '9');
+		my @upper = ('A' .. 'H', 'J' .. 'K', 'M' .. 'N', 'P' .. 'Y');
+		my @lower = ('a' .. 'h', 'j' .. 'k', 'm' .. 'n', 'p' .. 'y');
+		
+		# Replacing a character can remove the only occurrence of another
+		# class, so the repair is repeated until the password satisfies all
+		# three classes (converges in one or two iterations in practice)
+		for (1 .. 10) {
+			my @missing;
+			push @missing, [\@digits, [0 .. $password_length - 2]] if substr($password, 0, $password_length - 1) !~ /[0-9]/;
+			push @missing, [\@upper, [1 .. $password_length - 1]] if substr($password, 1) !~ /[A-Z]/;
+			push @missing, [\@lower, [0 .. $password_length - 1]] if $password !~ /[a-z]/;
+			last if !@missing;
+			
+			my %used_position;
+			for my $class (@missing) {
+				my @free_positions = grep { !$used_position{$_} } @{$class->[1]};
+				next if !@free_positions;
+				my $position = $free_positions[int(rand(scalar(@free_positions)))];
+				$used_position{$position} = 1;
+				substr($password, $position, 1, $class->[0][int(rand(scalar(@{$class->[0]})))]);
+			}
+		}
+	}
+
 	return $password;
 }
 
