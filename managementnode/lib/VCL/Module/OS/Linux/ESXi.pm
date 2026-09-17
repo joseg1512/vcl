@@ -338,6 +338,17 @@ sub post_load {
 	
 	notify($ERRORS{'OK'}, 0, "beginning ESXi post_load tasks, image: $image_name, computer: $computer_node_name");
 	
+	# Image capture puts the host into maintenance mode because ESXi refuses to shut down
+	# otherwise (see _enter_maintenance_mode). That state is part of the captured image, so
+	# clear it once the node is loaded and running, otherwise every reservation would start
+	# on a host flagged as being in maintenance.
+	$self->execute({
+		command => 'esxcli system maintenanceMode set --enable=false',
+		timeout => 60,
+		max_attempts => 1,
+		display_output => 0,
+	});
+	
 	if (!$self->wait_for_response(5, 600, 5)) {
 		notify($ERRORS{'WARNING'}, 0, "$computer_node_name never responded to SSH");
 		return;
