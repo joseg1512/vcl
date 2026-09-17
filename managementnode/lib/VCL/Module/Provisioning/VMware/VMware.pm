@@ -205,15 +205,19 @@ our %VM_OS_CONFIGURATION = (
 	},
 	
 	# Nested ESXi guest (image OS name contains 'esxi', e.g. vmwareesxi, esxi4.1):
+	# ESXi 7.x/8.x guests no longer ship the mptspi/lsiLogic (parallel SCSI) nor
+	# the mptsas driver, so disks on an lsiLogic controller are invisible inside
+	# the nested guest. Use PVSCSI (driver present in the guest boot image and
+	# the VMware EFI firmware).
 	"esxi-x86" => {
 		"guestOS" => "vmkernel",
 		"ethernet-virtualDev" => "e1000",
-		"scsi-virtualDev" => "lsiLogic",
+		"scsi-virtualDev" => "pvscsi",
 	},
 	"esxi-x86_64" => {
 		"guestOS" => "vmkernel6",
 		"ethernet-virtualDev" => "e1000",
-		"scsi-virtualDev" => "lsiLogic",
+		"scsi-virtualDev" => "pvscsi",
 	},
 	
 	# Default Windows configuration if Windows version isn't found above:
