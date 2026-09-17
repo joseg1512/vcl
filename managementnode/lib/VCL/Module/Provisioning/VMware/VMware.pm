@@ -2015,14 +2015,21 @@ sub prepare_vmx {
  Parameters  : $vmdk_file_path
  Returns     : boolean
  Description : Returns true if the vmdk path matches the ephemeral additional
-               disk naming pattern: {computer}_adddiskN.vmdk
+               disk naming pattern: {computer}_adddiskN.vmdk, including the
+               snapshot delta/ extent variants used while the VM is powered on
+               ({computer}_adddiskN-000001.vmdk, -flat, -delta)
 
 =cut
 
 sub is_additional_disk_vmdk_path {
 	my $self = shift;
 	my $vmdk_file_path = shift || '';
-	return ($vmdk_file_path =~ /_adddisk\d+\.vmdk$/i) ? 1 : 0;
+	# Match additional disk vmdk files regardless of the suffix used while the VM is powered
+	# on. A running VCL VM always uses a snapshot delta for each disk, so the vmx references
+	# e.g. {computer}_adddiskN-000001.vmdk instead of {computer}_adddiskN.vmdk. Also match
+	# the extent files (-flat, -delta, -sesparse). Anchoring only on "_adddiskN.vmdk$" made
+	# image capture abort with "found multiple OS vmdk file paths".
+	return ($vmdk_file_path =~ /_adddisk\d+[-\w]*\.vmdk$/i) ? 1 : 0;
 }
 
 #//////////////////////////////////////////////////////////////////////////////
