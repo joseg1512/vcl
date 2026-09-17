@@ -38,7 +38,9 @@ sync_vmk() {
     vmk_mac=$(esxcli network ip interface list 2>/dev/null | awk -v n="$vmk" '$0 ~ ("Name: " n "$") {f=1} f && /MAC Address:/ {print $3; exit}')
     [ "$vmk_mac" = "$pnic_mac" ] && return 0
 
-    pg=$(esxcli network ip interface list 2>/dev/null | awk -v n="$vmk" '$0 ~ ("Name: " n "$") {f=1} f && /Portgroup:/ {print $2; exit}')
+    # El nombre del portgroup puede tener espacios ("Management Network"), asi que
+    # se toma todo lo que sigue a "Portgroup: " y no el segundo campo.
+    pg=$(esxcli network ip interface list 2>/dev/null | awk -v n="$vmk" '$0 ~ ("Name: " n "$") {f=1} f && /Portgroup:/ {sub(/^[ \t]*Portgroup:[ \t]*/, ""); print; exit}')
     [ -n "$pg" ] || pg="$pg_default"
 
     # El portgroup tiene que existir; si no, no se toca la interfaz.
