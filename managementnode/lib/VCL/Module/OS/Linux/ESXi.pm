@@ -1912,6 +1912,46 @@ sub is_connected {
 
 #//////////////////////////////////////////////////////////////////////////////
 
+=head2 _enter_maintenance_mode
+
+ Parameters  : none
+ Returns     : boolean
+ Description : Puts the ESXi host into maintenance mode. ESXi refuses
+               'esxcli system shutdown poweroff|reboot' unless the host is in
+               maintenance mode ('System is not in maintenance mode. Cannot
+               perform requested operation.'), so the graceful shutdown used by
+               pre_capture (image capture) never happened and the VM was powered
+               off forcefully, losing unflushed configuration.
+
+=cut
+
+sub _enter_maintenance_mode {
+	my $self = shift;
+	if (ref($self) !~ /VCL::Module/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	my $computer_node_name = $self->data->get_computer_node_name();
+	my ($exit_status, $output) = $self->execute({
+		command => 'esxcli system maintenanceMode set --enable=true',
+		timeout => 60,
+		max_attempts => 1,
+		display_output => 0,
+	});
+	if (!defined($output)) {
+		notify($ERRORS{'WARNING'}, 0, "failed to execute maintenance mode command on $computer_node_name");
+		return;
+	}
+	elsif ($exit_status && $exit_status ne '0' && !grep(/already|maintenance/i, @$output)) {
+		notify($ERRORS{'WARNING'}, 0, "failed to enable maintenance mode on $computer_node_name, output:\n" . join("\n", @$output));
+		return;
+	}
+	notify($ERRORS{'DEBUG'}, 0, "enabled maintenance mode on $computer_node_name");
+	return 1;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
 =head2 shutdown
 
  Parameters  : none
@@ -1930,6 +1970,13 @@ sub shutdown {
 	my $computer_node_name = $self->data->get_computer_node_name();
 	
 	if ($self->wait_for_ssh(0)) {
+		# ESXi refuses 'esxcli system shutdown' unless the host is in maintenance mode.
+		# Without it the command fails with "System is not in maintenance mode. Cannot
+		# perform requested operation.", the graceful power off/reboot never happens and
+		# the provisioning module ends up forcing it. A forced power off discards config
+		# that hostd has not flushed yet - e.g. the DHCP mode pre_capture enables on the
+		# private VMkernel interface - so captured images booted with the old static IP.
+		$self->_enter_maintenance_mode();
 		my $command = 'esxcli system shutdown poweroff --reason="VCL capture"';
 		notify($ERRORS{'DEBUG'}, 0, "attempting to shut down $computer_node_name by executing '$command'");
 		$self->execute({
@@ -1975,6 +2022,13 @@ sub reboot {
 	my $reboot_start_time = time();
 	
 	if ($self->wait_for_ssh(0)) {
+		# ESXi refuses 'esxcli system shutdown' unless the host is in maintenance mode.
+		# Without it the command fails with "System is not in maintenance mode. Cannot
+		# perform requested operation.", the graceful power off/reboot never happens and
+		# the provisioning module ends up forcing it. A forced power off discards config
+		# that hostd has not flushed yet - e.g. the DHCP mode pre_capture enables on the
+		# private VMkernel interface - so captured images booted with the old static IP.
+		$self->_enter_maintenance_mode();
 		my $command = 'esxcli system shutdown reboot --reason="VCL"';
 		$self->execute({
 			command => $command,
