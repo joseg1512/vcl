@@ -205,15 +205,19 @@ our %VM_OS_CONFIGURATION = (
 	},
 	
 	# Nested ESXi guest (image OS name contains 'esxi', e.g. vmwareesxi, esxi4.1):
+	# ESXi 7.x/8.x guests no longer ship the mptspi/lsiLogic (parallel SCSI) nor
+	# the mptsas driver, so disks on an lsiLogic controller are invisible inside
+	# the nested guest. Use PVSCSI (driver present in the guest boot image and
+	# the VMware EFI firmware).
 	"esxi-x86" => {
 		"guestOS" => "vmkernel",
 		"ethernet-virtualDev" => "e1000",
-		"scsi-virtualDev" => "lsiLogic",
+		"scsi-virtualDev" => "pvscsi",
 	},
 	"esxi-x86_64" => {
 		"guestOS" => "vmkernel6",
 		"ethernet-virtualDev" => "e1000",
-		"scsi-virtualDev" => "lsiLogic",
+		"scsi-virtualDev" => "pvscsi",
 	},
 	
 	# Default Windows configuration if Windows version isn't found above:
@@ -1013,9 +1017,15 @@ sub capture {
 		# Check if the image repository path configured in the VM profile is mounted on the host or on the management node
 		if ($repository_mounted_on_vmhost) {
 			# Files can be copied directly to the image repository and converted while they are copied
+			# Do NOT force a destination disk type here. When the image repository is mounted on the VM
+			# host, the repository copy IS the image that linked clones are created from, so it has to be
+			# in a format the hypervisor can power on. copy_vmdk() defaults to 'thin' on ESX hosts and to
+			# '2gbsparse' otherwise. Forcing '2gbsparse' (a hosted format) on an ESX host produced images
+			# that failed to power on with 'Unsupported or invalid disk type 7 for scsi0:0' /
+			# 'Object type requires hosted I/O'.
 			my $repository_vmdk_file_path = $self->get_repository_vmdk_file_path();
-			notify($ERRORS{'DEBUG'}, 0, "vmdk will be copied directly from VM host $vmhost_name to the image repository in the 2gbsparse disk format: '$vmdk_file_path_renamed' --> '$repository_vmdk_file_path'");
-			if ($self->copy_vmdk($vmdk_file_path_renamed, $repository_vmdk_file_path, '2gbsparse')) {
+			notify($ERRORS{'DEBUG'}, 0, "vmdk will be copied directly from VM host $vmhost_name to the image repository: '$vmdk_file_path_renamed' --> '$repository_vmdk_file_path'");
+			if ($self->copy_vmdk($vmdk_file_path_renamed, $repository_vmdk_file_path)) {
 				$repository_copy_successful = 1;
 			}
 			else {
@@ -2011,14 +2021,21 @@ sub prepare_vmx {
  Parameters  : $vmdk_file_path
  Returns     : boolean
  Description : Returns true if the vmdk path matches the ephemeral additional
-               disk naming pattern: {computer}_adddiskN.vmdk
+               disk naming pattern: {computer}_adddiskN.vmdk, including the
+               snapshot delta/ extent variants used while the VM is powered on
+               ({computer}_adddiskN-000001.vmdk, -flat, -delta)
 
 =cut
 
 sub is_additional_disk_vmdk_path {
 	my $self = shift;
 	my $vmdk_file_path = shift || '';
-	return ($vmdk_file_path =~ /_adddisk\d+\.vmdk$/i) ? 1 : 0;
+	# Match additional disk vmdk files regardless of the suffix used while the VM is powered
+	# on. A running VCL VM always uses a snapshot delta for each disk, so the vmx references
+	# e.g. {computer}_adddiskN-000001.vmdk instead of {computer}_adddiskN.vmdk. Also match
+	# the extent files (-flat, -delta, -sesparse). Anchoring only on "_adddiskN.vmdk$" made
+	# image capture abort with "found multiple OS vmdk file paths".
+	return ($vmdk_file_path =~ /_adddisk\d+[-\w]*\.vmdk$/i) ? 1 : 0;
 }
 
 #//////////////////////////////////////////////////////////////////////////////

@@ -338,6 +338,17 @@ sub post_load {
 	
 	notify($ERRORS{'OK'}, 0, "beginning ESXi post_load tasks, image: $image_name, computer: $computer_node_name");
 	
+	# Image capture puts the host into maintenance mode because ESXi refuses to shut down
+	# otherwise (see _enter_maintenance_mode). That state is part of the captured image, so
+	# clear it once the node is loaded and running, otherwise every reservation would start
+	# on a host flagged as being in maintenance.
+	$self->execute({
+		command => 'esxcli system maintenanceMode set --enable=false',
+		timeout => 60,
+		max_attempts => 1,
+		display_output => 0,
+	});
+	
 	if (!$self->wait_for_response(5, 600, 5)) {
 		notify($ERRORS{'WARNING'}, 0, "$computer_node_name never responded to SSH");
 		return;
@@ -1912,6 +1923,46 @@ sub is_connected {
 
 #//////////////////////////////////////////////////////////////////////////////
 
+=head2 _enter_maintenance_mode
+
+ Parameters  : none
+ Returns     : boolean
+ Description : Puts the ESXi host into maintenance mode. ESXi refuses
+               'esxcli system shutdown poweroff|reboot' unless the host is in
+               maintenance mode ('System is not in maintenance mode. Cannot
+               perform requested operation.'), so the graceful shutdown used by
+               pre_capture (image capture) never happened and the VM was powered
+               off forcefully, losing unflushed configuration.
+
+=cut
+
+sub _enter_maintenance_mode {
+	my $self = shift;
+	if (ref($self) !~ /VCL::Module/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	my $computer_node_name = $self->data->get_computer_node_name();
+	my ($exit_status, $output) = $self->execute({
+		command => 'esxcli system maintenanceMode set --enable=true',
+		timeout => 60,
+		max_attempts => 1,
+		display_output => 0,
+	});
+	if (!defined($output)) {
+		notify($ERRORS{'WARNING'}, 0, "failed to execute maintenance mode command on $computer_node_name");
+		return;
+	}
+	elsif ($exit_status && $exit_status ne '0' && !grep(/already|maintenance/i, @$output)) {
+		notify($ERRORS{'WARNING'}, 0, "failed to enable maintenance mode on $computer_node_name, output:\n" . join("\n", @$output));
+		return;
+	}
+	notify($ERRORS{'DEBUG'}, 0, "enabled maintenance mode on $computer_node_name");
+	return 1;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
 =head2 shutdown
 
  Parameters  : none
@@ -1930,6 +1981,13 @@ sub shutdown {
 	my $computer_node_name = $self->data->get_computer_node_name();
 	
 	if ($self->wait_for_ssh(0)) {
+		# ESXi refuses 'esxcli system shutdown' unless the host is in maintenance mode.
+		# Without it the command fails with "System is not in maintenance mode. Cannot
+		# perform requested operation.", the graceful power off/reboot never happens and
+		# the provisioning module ends up forcing it. A forced power off discards config
+		# that hostd has not flushed yet - e.g. the DHCP mode pre_capture enables on the
+		# private VMkernel interface - so captured images booted with the old static IP.
+		$self->_enter_maintenance_mode();
 		my $command = 'esxcli system shutdown poweroff --reason="VCL capture"';
 		notify($ERRORS{'DEBUG'}, 0, "attempting to shut down $computer_node_name by executing '$command'");
 		$self->execute({
@@ -1975,6 +2033,13 @@ sub reboot {
 	my $reboot_start_time = time();
 	
 	if ($self->wait_for_ssh(0)) {
+		# ESXi refuses 'esxcli system shutdown' unless the host is in maintenance mode.
+		# Without it the command fails with "System is not in maintenance mode. Cannot
+		# perform requested operation.", the graceful power off/reboot never happens and
+		# the provisioning module ends up forcing it. A forced power off discards config
+		# that hostd has not flushed yet - e.g. the DHCP mode pre_capture enables on the
+		# private VMkernel interface - so captured images booted with the old static IP.
+		$self->_enter_maintenance_mode();
 		my $command = 'esxcli system shutdown reboot --reason="VCL"';
 		$self->execute({
 			command => $command,
@@ -2667,70 +2732,8 @@ sub get_os_type {
 	}
 }
 
-sub get_private_mac_address {
-	my $self = shift;
-	if (ref($self) !~ /VCL::Module/i) {
-		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
-		return;
-	}
-	
-	my $computer_node_name = $self->data->get_computer_node_name() || return;
-	my $command = "esxcli network ip interface list | grep -A20 -m1 'Name\|MTU' | grep -m1 'MAC Address' | awk '{print \$NF}'";
-	my ($exit_status, $output) = $self->execute($command, 0);
-	if (!defined($output)) {
-		notify($ERRORS{'WARNING'}, 0, "failed to execute esxcli to determine private MAC address on $computer_node_name");
-		return;
-	}
-	elsif ($exit_status ne '0' || !grep(/:/, @$output)) {
-		# fallback: obtener via esxcli network ip interface ipv4 get (mac no aparece) -> usar interfaz vmk0
-		($exit_status, $output) = $self->execute("esxcli network ip interface list | grep -m1 'MAC Address' | awk '{print \$NF}'", 0);
-		if (!defined($output) || !grep(/:/, @$output)) {
-			notify($ERRORS{'WARNING'}, 0, "unable to determine private MAC address on $computer_node_name");
-			return;
-		}
-	}
-	my $mac_address = $output->[0];
-	chomp $mac_address;
-	notify($ERRORS{'DEBUG'}, 0, "retrieved private MAC address on $computer_node_name: $mac_address");
-	return lc($mac_address);
-}
-
-sub get_public_mac_address {
-	my $self = shift;
-	return $self->get_private_mac_address();
-}
 
 
-
-#//////////////////////////////////////////////////////////////////////////////
-
-=head2 get_public_interface_name
-
- Parameters  : none
- Returns     : string
- Description : ESXi nested uses a single VMkernel NIC (vmk0) for both private
-               and public traffic (same LAN). The base OS.pm logic rejects an
-               interface whose only IP equals the private IP, so override to
-               return the private interface name.
-
-=cut
-
-sub get_public_interface_name {
-	my $self = shift;
-	if (ref($self) !~ /VCL::Module/i) {
-		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
-		return;
-	}
-
-	my $private_interface_name = $self->get_private_interface_name();
-	if (!$private_interface_name) {
-		notify($ERRORS{'WARNING'}, 0, "unable to determine public interface name, private interface name could not be determined");
-		return;
-	}
-
-	notify($ERRORS{'DEBUG'}, 0, "ESXi nested: public and private interface are the same ($private_interface_name)");
-	return $private_interface_name;
-}
 
 
 #//////////////////////////////////////////////////////////////////////////////
@@ -2739,11 +2742,11 @@ sub get_public_interface_name {
 
  Parameters  : none
  Returns     : string
- Description : ESXi nested: la ruta default ya esta configurada en el guest
-               (vmk0 -> 192.168.0.1). El OS.pm base depende de la key
-               'default_gateway' del network config, que puede faltar si
-               esxcli route list falla intermitentemente. Devuelve el gateway
-               del management node directamente.
+ Description : ESXi: la IP publica del nodo vive en la NIC publica (vmk1) y su
+               ruta default es la del management node. El OS.pm base depende de
+               la key 'default_gateway' del network config, que puede faltar si
+               'esxcli network ip route ipv4 list' falla. Se devuelve el gateway
+               correcto calculado por el management node.
 
 =cut
 
@@ -2767,49 +2770,3 @@ sub get_default_gateway {
 
 1;
 __END__
-
-
-#//////////////////////////////////////////////////////////////////////////////
-
-=head2 get_os_type
-
- Parameters  : none
- Returns     : string
- Description : Returns the OS type of the guest. ESXi 'uname -a' reports
-               'VMkernel ... ESXi' which the base OS.pm::get_os_type() does
-               not recognize (no 'linux'/'win' substring). The OS table row
-               'vmwareesxi' has type 'linux', so return 'linux' for ESXi
-               guests so that libvirt.pm::get_active_domain_name() works.
-
-=cut
-
-
-
-#//////////////////////////////////////////////////////////////////////////////
-
-=head2 get_private_mac_address
-
- Parameters  : none
- Returns     : string
- Description : Returns the MAC address of the first VMkernel NIC (esxcli).
-
-=cut
-
-
-#//////////////////////////////////////////////////////////////////////////////
-
-=head2 get_public_mac_address
-
- Parameters  : none
- Returns     : string
- Description : ESXi nested suele tener un solo VMkernel NIC (vmk0) para todo.
-               Devuelve la misma MAC que private.
-
-=cut
-
-
-=head1 SEE ALSO
-
-L<http://cwiki.apache.org/VCL/>
-
-=cut
