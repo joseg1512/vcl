@@ -4893,6 +4893,14 @@ AND managementnode.id != $management_node_id
 	$management_node_info->{INCLUDE_SPECIAL_CHARS} = $user_password_include_spchar;
 	$ENV->{management_node_info}->{INCLUDE_SPECIAL_CHARS} =  $management_node_info->{INCLUDE_SPECIAL_CHARS};
 
+	# Nested virtualization vmx parameters (cpuid/featMask/vhv) prevent powering
+	# on VMs on hosts that report nested virtualization support but do not
+	# actually expose VMX to their guests, such as an ESXi host running inside
+	# KVM. Sites can opt out by setting the 'disable_nested_vhv' variable to 1.
+	my $disable_nested_vhv = get_variable('disable_nested_vhv') || 0;
+	$management_node_info->{DISABLE_NESTED_VHV} = $disable_nested_vhv;
+	$ENV->{management_node_info}->{DISABLE_NESTED_VHV} = $management_node_info->{DISABLE_NESTED_VHV};
+
 	# Get the OS name
 	my $os_name = lc($^O);
 	$management_node_info->{OSNAME} = $os_name;

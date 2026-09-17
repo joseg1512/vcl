@@ -1813,14 +1813,24 @@ sub prepare_vmx {
 	);
 	
 	if ($self->api->is_nested_virtualization_supported()) {
-		%vmx_parameters = (%vmx_parameters, (
-			"cpuid.1.ecx" => "--------------------------H-----",
-			"featMask.vm.hv.capable" => "Min:1",
-			"hypervisor.cpuid.v0" => "FALSE",
-			"monitor.virtual_mmu" => "hardware",
-			"monitor.virtual_exec" => "hardware",
-			"vhv.enable" => "TRUE",
-		));
+		# Skip the nested virtualization vmx parameters when disabled in the
+		# database ('disable_nested_vhv' variable). Hosts that report nested
+		# virtualization support but do not actually expose VMX to their guests
+		# (for example an ESXi host running inside KVM) fail to power on VMs
+		# when these parameters are set.
+		if ($ENV->{management_node_info}->{DISABLE_NESTED_VHV}) {
+			notify($ERRORS{'DEBUG'}, 0, "skipping nested virtualization vmx parameters for $computer_name, 'disable_nested_vhv' is enabled");
+		}
+		else {
+			%vmx_parameters = (%vmx_parameters, (
+				"cpuid.1.ecx" => "--------------------------H-----",
+				"featMask.vm.hv.capable" => "Min:1",
+				"hypervisor.cpuid.v0" => "FALSE",
+				"monitor.virtual_mmu" => "hardware",
+				"monitor.virtual_exec" => "hardware",
+				"vhv.enable" => "TRUE",
+			));
+		}
 	}
 	
 	#>>>>>>>>>>
