@@ -1017,9 +1017,15 @@ sub capture {
 		# Check if the image repository path configured in the VM profile is mounted on the host or on the management node
 		if ($repository_mounted_on_vmhost) {
 			# Files can be copied directly to the image repository and converted while they are copied
+			# Do NOT force a destination disk type here. When the image repository is mounted on the VM
+			# host, the repository copy IS the image that linked clones are created from, so it has to be
+			# in a format the hypervisor can power on. copy_vmdk() defaults to 'thin' on ESX hosts and to
+			# '2gbsparse' otherwise. Forcing '2gbsparse' (a hosted format) on an ESX host produced images
+			# that failed to power on with 'Unsupported or invalid disk type 7 for scsi0:0' /
+			# 'Object type requires hosted I/O'.
 			my $repository_vmdk_file_path = $self->get_repository_vmdk_file_path();
-			notify($ERRORS{'DEBUG'}, 0, "vmdk will be copied directly from VM host $vmhost_name to the image repository in the 2gbsparse disk format: '$vmdk_file_path_renamed' --> '$repository_vmdk_file_path'");
-			if ($self->copy_vmdk($vmdk_file_path_renamed, $repository_vmdk_file_path, '2gbsparse')) {
+			notify($ERRORS{'DEBUG'}, 0, "vmdk will be copied directly from VM host $vmhost_name to the image repository: '$vmdk_file_path_renamed' --> '$repository_vmdk_file_path'");
+			if ($self->copy_vmdk($vmdk_file_path_renamed, $repository_vmdk_file_path)) {
 				$repository_copy_successful = 1;
 			}
 			else {
