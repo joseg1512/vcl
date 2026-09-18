@@ -338,20 +338,19 @@ sub post_load {
 	
 	notify($ERRORS{'OK'}, 0, "beginning ESXi post_load tasks, image: $image_name, computer: $computer_node_name");
 	
-	# Image capture puts the host into maintenance mode because ESXi refuses to shut down
-	# otherwise (see _enter_maintenance_mode). That state is part of the captured image, so
-	# clear it once the node is loaded and running, otherwise every reservation would start
-	# on a host flagged as being in maintenance.
-	$self->execute({
-		command => 'esxcli system maintenanceMode set --enable=false',
-		timeout => 60,
-		max_attempts => 1,
-		display_output => 0,
-	});
-	
 	if (!$self->wait_for_response(5, 600, 5)) {
 		notify($ERRORS{'WARNING'}, 0, "$computer_node_name never responded to SSH");
 		return;
+	}
+	
+	# Image capture puts the host into maintenance mode because ESXi refuses to shut down
+	# otherwise (see _enter_maintenance_mode) and the captured image keeps that state, so
+	# every clone boots flagged as being in maintenance and the Host Client rejects VM
+	# creation with 'the VM configuration was rejected'. Clearing it has to happen after
+	# the guest actually answers: post_load is called while the clone is still booting, so
+	# issuing the command any earlier only produces an SSH failure that nothing reports.
+	if (!$self->_exit_maintenance_mode()) {
+		notify($ERRORS{'WARNING'}, 0, "failed to clear maintenance mode on $computer_node_name, VM creation will be rejected");
 	}
 	
 	if (!$self->create_currentimage_txt()) {
@@ -366,6 +365,13 @@ sub post_load {
 	if (!$self->update_public_ip_address()) {
 		notify($ERRORS{'WARNING'}, 0, "failed to update public IP address");
 		return;
+	}
+	
+	# The students create their VMs from the Host Client and that client needs a
+	# network in hostd's inventory. A clone boots with that inventory empty (see
+	# _ensure_vm_network), so it is recreated here, once the addresses are settled.
+	if (!$self->_ensure_vm_network()) {
+		notify($ERRORS{'WARNING'}, 0, "failed to set up the VM network on $computer_node_name, the Host Client will not offer a network to create VMs");
 	}
 	
 	# Skip configure_ext_sshd and configure_rc_local
@@ -1958,6 +1964,151 @@ sub _enter_maintenance_mode {
 		return;
 	}
 	notify($ERRORS{'DEBUG'}, 0, "enabled maintenance mode on $computer_node_name");
+	return 1;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 _exit_maintenance_mode
+
+ Parameters  : none
+ Returns     : boolean
+ Description : Clears maintenance mode on the ESXi host. A capture has to enable it
+               for ESXi to shut down cleanly (see _enter_maintenance_mode) and the
+               captured image keeps that state, so every clone boots flagged as being
+               in maintenance and the Host Client rejects VM creation with 'the VM
+               configuration was rejected'.
+
+=cut
+
+sub _exit_maintenance_mode {
+	my $self = shift;
+	if (ref($self) !~ /VCL::Module/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	my $computer_node_name = $self->data->get_computer_node_name();
+	my ($exit_status, $output) = $self->execute({
+		command => 'esxcli system maintenanceMode set --enable=false',
+		timeout => 60,
+		max_attempts => 1,
+		display_output => 0,
+	});
+	if (!defined($output)) {
+		notify($ERRORS{'WARNING'}, 0, "failed to execute maintenance mode command on $computer_node_name");
+		return;
+	}
+	elsif ($exit_status && $exit_status ne '0') {
+		notify($ERRORS{'WARNING'}, 0, "failed to exit maintenance mode on $computer_node_name, exit status: $exit_status, output:\n" . join("\n", @$output));
+		return;
+	}
+	
+	# Read the state back: the set command answers 'Maintenance mode is already disabled'
+	# when it changes nothing, so the query is the only proof the host left maintenance mode.
+	my ($state_exit_status, $state_output) = $self->execute({
+		command => 'esxcli system maintenanceMode get',
+		timeout => 60,
+		max_attempts => 1,
+		display_output => 0,
+	});
+	if (!defined($state_output)) {
+		notify($ERRORS{'WARNING'}, 0, "failed to verify maintenance mode state on $computer_node_name");
+		return;
+	}
+	elsif (grep(/^\s*Enabled\b/i, @$state_output)) {
+		notify($ERRORS{'WARNING'}, 0, "$computer_node_name is still in maintenance mode, VM creation will be rejected");
+		return;
+	}
+	
+	notify($ERRORS{'DEBUG'}, 0, "exited maintenance mode on $computer_node_name");
+	return 1;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 _ensure_vm_network
+
+ Parameters  : none
+ Returns     : boolean
+ Description : Creates the portgroup the students' VMs are attached to. A nested ESXi
+               clone boots with an EMPTY network inventory: its portgroups exist in
+               the host configuration (esxcli lists them) but hostd never registers
+               them as Network objects, and the Host Client's create-VM wizard needs
+               one to build the NIC. With no network to choose, the wizard rejects
+               the configuration ('The VM configuration was rejected. Please see
+               browser Console') and no createVm call ever reaches hostd.
+               A portgroup created while hostd is running IS registered, so this
+               recreates a dedicated portgroup on every load: it is the cheapest way
+               to guarantee the node offers a usable network. It is created on the
+               same vSwitch as the public interface, so the VMs land on the network
+               the user reaches.
+
+=cut
+
+sub _ensure_vm_network {
+	my $self = shift;
+	if (ref($self) !~ /VCL::Module/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	my $computer_node_name = $self->data->get_computer_node_name();
+	my $vm_portgroup = 'VCL VMs';
+	
+	my $public_interface = $self->get_public_interface_name(1);
+	if (!$public_interface) {
+		notify($ERRORS{'WARNING'}, 0, "failed to determine the public interface on $computer_node_name");
+		return;
+	}
+	
+	my ($interface_exit_status, $interface_output) = $self->execute({
+		command => 'esxcli network ip interface list',
+		timeout => 60,
+		max_attempts => 1,
+	});
+	if (!defined($interface_output) || !@$interface_output) {
+		notify($ERRORS{'WARNING'}, 0, "failed to retrieve the VMkernel interfaces on $computer_node_name");
+		return;
+	}
+	
+	# The portset of the public interface is the vSwitch that reaches the user's
+	# network. The labels are matched instead of fixed fields because the portgroup
+	# name may contain spaces.
+	my $vswitch;
+	my $in_public_interface = 0;
+	for my $line (@$interface_output) {
+		if ($line =~ /^\s*Name:\s+(\S+)\s*$/) {
+			$in_public_interface = ($1 eq $public_interface) ? 1 : 0;
+		}
+		elsif ($in_public_interface && $line =~ /^\s*Portset:\s*(\S+)\s*$/) {
+			$vswitch = $1;
+			last;
+		}
+	}
+	if (!$vswitch) {
+		notify($ERRORS{'WARNING'}, 0, "failed to determine the vSwitch of $public_interface on $computer_node_name");
+		return;
+	}
+	
+	# Delete (if present) and create: hostd only registers portgroups created while
+	# it is running, so recreating it is what makes it visible to the Host Client.
+	$self->execute({
+		command => "esxcli network vswitch standard portgroup remove --portgroup-name='$vm_portgroup' --vswitch-name='$vswitch'",
+		timeout => 60,
+		max_attempts => 1,
+		display_output => 0,
+	});
+	my ($add_exit_status, $add_output) = $self->execute({
+		command => "esxcli network vswitch standard portgroup add --portgroup-name='$vm_portgroup' --vswitch-name='$vswitch'",
+		timeout => 60,
+		max_attempts => 1,
+		display_output => 0,
+	});
+	if (!defined($add_output) || ($add_exit_status && $add_exit_status ne '0')) {
+		notify($ERRORS{'WARNING'}, 0, "failed to create portgroup '$vm_portgroup' on $vswitch ($computer_node_name), the Host Client will not offer a network for the students' VMs, output:\n" . format_data($add_output));
+		return;
+	}
+	
+	notify($ERRORS{'DEBUG'}, 0, "created portgroup '$vm_portgroup' on $vswitch for the students' VMs on $computer_node_name");
 	return 1;
 }
 
