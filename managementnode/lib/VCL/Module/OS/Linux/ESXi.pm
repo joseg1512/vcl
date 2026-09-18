@@ -338,20 +338,19 @@ sub post_load {
 	
 	notify($ERRORS{'OK'}, 0, "beginning ESXi post_load tasks, image: $image_name, computer: $computer_node_name");
 	
-	# Image capture puts the host into maintenance mode because ESXi refuses to shut down
-	# otherwise (see _enter_maintenance_mode). That state is part of the captured image, so
-	# clear it once the node is loaded and running, otherwise every reservation would start
-	# on a host flagged as being in maintenance.
-	$self->execute({
-		command => 'esxcli system maintenanceMode set --enable=false',
-		timeout => 60,
-		max_attempts => 1,
-		display_output => 0,
-	});
-	
 	if (!$self->wait_for_response(5, 600, 5)) {
 		notify($ERRORS{'WARNING'}, 0, "$computer_node_name never responded to SSH");
 		return;
+	}
+	
+	# Image capture puts the host into maintenance mode because ESXi refuses to shut down
+	# otherwise (see _enter_maintenance_mode) and the captured image keeps that state, so
+	# every clone boots flagged as being in maintenance and the Host Client rejects VM
+	# creation with 'the VM configuration was rejected'. Clearing it has to happen after
+	# the guest actually answers: post_load is called while the clone is still booting, so
+	# issuing the command any earlier only produces an SSH failure that nothing reports.
+	if (!$self->_exit_maintenance_mode()) {
+		notify($ERRORS{'WARNING'}, 0, "failed to clear maintenance mode on $computer_node_name, VM creation will be rejected");
 	}
 	
 	if (!$self->create_currentimage_txt()) {
@@ -1958,6 +1957,63 @@ sub _enter_maintenance_mode {
 		return;
 	}
 	notify($ERRORS{'DEBUG'}, 0, "enabled maintenance mode on $computer_node_name");
+	return 1;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 _exit_maintenance_mode
+
+ Parameters  : none
+ Returns     : boolean
+ Description : Clears maintenance mode on the ESXi host. A capture has to enable it
+               for ESXi to shut down cleanly (see _enter_maintenance_mode) and the
+               captured image keeps that state, so every clone boots flagged as being
+               in maintenance and the Host Client rejects VM creation with 'the VM
+               configuration was rejected'.
+
+=cut
+
+sub _exit_maintenance_mode {
+	my $self = shift;
+	if (ref($self) !~ /VCL::Module/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	my $computer_node_name = $self->data->get_computer_node_name();
+	my ($exit_status, $output) = $self->execute({
+		command => 'esxcli system maintenanceMode set --enable=false',
+		timeout => 60,
+		max_attempts => 1,
+		display_output => 0,
+	});
+	if (!defined($output)) {
+		notify($ERRORS{'WARNING'}, 0, "failed to execute maintenance mode command on $computer_node_name");
+		return;
+	}
+	elsif ($exit_status && $exit_status ne '0') {
+		notify($ERRORS{'WARNING'}, 0, "failed to exit maintenance mode on $computer_node_name, exit status: $exit_status, output:\n" . join("\n", @$output));
+		return;
+	}
+	
+	# Read the state back: the set command answers 'Maintenance mode is already disabled'
+	# when it changes nothing, so the query is the only proof the host left maintenance mode.
+	my ($state_exit_status, $state_output) = $self->execute({
+		command => 'esxcli system maintenanceMode get',
+		timeout => 60,
+		max_attempts => 1,
+		display_output => 0,
+	});
+	if (!defined($state_output)) {
+		notify($ERRORS{'WARNING'}, 0, "failed to verify maintenance mode state on $computer_node_name");
+		return;
+	}
+	elsif (grep(/^\s*Enabled\b/i, @$state_output)) {
+		notify($ERRORS{'WARNING'}, 0, "$computer_node_name is still in maintenance mode, VM creation will be rejected");
+		return;
+	}
+	
+	notify($ERRORS{'DEBUG'}, 0, "exited maintenance mode on $computer_node_name");
 	return 1;
 }
 
