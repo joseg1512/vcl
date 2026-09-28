@@ -395,6 +395,7 @@ div.dijitMenuPopup table tbody tr.dijitMenuItemFocused td {
 #content div.dashwidget h3,
 #content div.dashwidget h3 a {
 	background-color: #4E6A77;
+	color: #fff;
 }
 #content div.dashwidget h3 a:hover {
 	background-color: #3d5560;
@@ -598,4 +599,63 @@ footer a:hover {
 .site-info img {
 	vertical-align: middle;
 	margin: 0 0.35em;
+}
+
+/* ---------------------------------------------------------------- *
+ * Professor feedback, round 1
+ * ---------------------------------------------------------------- */
+
+/*
+ * 1. Header bar and logo aligned with the content below.
+ * Bootstrap's .container is centered and capped at 1170px, so at wide
+ * viewports the logo and the nav bar started ~60-375px from the left while
+ * #content starts at 8px (an empty field on the left). Full width + the same
+ * 8px inset as #content.
+ */
+#siteheader div.container,
+#site-navigation div.container {
+	width: auto;
+	max-width: none;
+	margin-left: 0;
+	margin-right: 0;
+	padding-left: 8px;
+	padding-right: 8px;
+}
+#topmenu > li:first-child > a {
+	padding-left: 0;
+}
+
+/*
+ * 2. Selected buttons: the NAC light cyan instead of the stock blue.
+ *    (top menu items of the current page, dropdown items, privilege tree,
+ *    grid rows)
+ */
+#topmenu > li > a:hover,
+#topmenu > li > a:focus {
+	background-color: #e7f6fd;
+	color: #4E6A77;
+}
+#topmenu > li.active > a,
+.navbar-default .navbar-nav > .active > a,
+.navbar-default .navbar-nav > .active > a:hover,
+.navbar-default .navbar-nav > .active > a:focus,
+.navbar-default .navbar-nav > .open > a,
+.navbar-default .navbar-nav > .open > a:hover,
+.navbar-default .navbar-nav > .open > a:focus {
+	background-color: #8FD8F8;
+	color: #1f2d33;
+}
+.dropdown-menu > .active > a,
+.dropdown-menu > .active > a:hover,
+.dropdown-menu > .active > a:focus {
+	background-color: #8FD8F8;
+	color: #1f2d33;
+}
+.privtreeselected {
+	background-color: #8FD8F8;
+	color: #1f2d33;
+}
+div.dojoxGridRowSelected table.dojoxGridRowTable tbody tr td,
+.tundra .dojoxGridRowSelected td {
+	background-color: #8FD8F8;
 }

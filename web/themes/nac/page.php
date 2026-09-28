@@ -52,7 +52,8 @@ function getHeader($refresh) {
 
 	$rt .= "<script src=\"https://ajax.googleapis.com/ajax/libs/jquery/1.12.4/jquery.min.js\" integrity=\"sha512-jGsMH83oKe9asCpkOVkBnUrDDTp8wl+adkB2D+//JtlxO4SrLoJdhbOysIFQJloQFD+C4Fl1rMsQZF76JjV0eQ==\" crossorigin=\"anonymous\"></script>\n";
 
-	$rt .= "<link href=\"themes/nac/css/theme.css\" rel=\"stylesheet\" type=\"text/css\" />\n";
+	$themeversion = @filemtime(__DIR__ . "/css/theme.css");
+	$rt .= "<link href=\"themes/nac/css/theme.css" . ($themeversion ? "?v=$themeversion" : "") . "\" rel=\"stylesheet\" type=\"text/css\" />\n";
 	$rt .= "<script src=\"themes/nac/js/topnav.js\" type=\"text/javascript\"></script>\n";
 	$rt .= "<script src=\"js/code.js?v=$v\" type=\"text/javascript\"></script>\n";
 	if($usenls)
