@@ -395,7 +395,6 @@ div.dijitMenuPopup table tbody tr.dijitMenuItemFocused td {
 #content div.dashwidget h3,
 #content div.dashwidget h3 a {
 	background-color: #4E6A77;
-	color: #fff;
 }
 #content div.dashwidget h3 a:hover {
 	background-color: #3d5560;
@@ -631,36 +630,9 @@ footer a:hover {
 }
 
 /*
- * 2. Selected buttons: the NAC light cyan instead of the stock blue.
- *    (top menu items of the current page, dropdown items, privilege tree,
- *    grid rows)
+ * (2) Selected buttons in the NAC light cyan instead of the stock blue:
+ *     reverted here on purpose to compare the alignment fix alone against the
+ *     previous version. The change is kept in the branch fix/nac-theme-round1
+ *     (commit 0fa2238f): top menu items, dropdown items, privilege tree
+ *     (#678db2) and grid rows (#aec7e3).
  */
-#topmenu > li > a:hover,
-#topmenu > li > a:focus {
-	background-color: #e7f6fd;
-	color: #4E6A77;
-}
-#topmenu > li.active > a,
-.navbar-default .navbar-nav > .active > a,
-.navbar-default .navbar-nav > .active > a:hover,
-.navbar-default .navbar-nav > .active > a:focus,
-.navbar-default .navbar-nav > .open > a,
-.navbar-default .navbar-nav > .open > a:hover,
-.navbar-default .navbar-nav > .open > a:focus {
-	background-color: #8FD8F8;
-	color: #1f2d33;
-}
-.dropdown-menu > .active > a,
-.dropdown-menu > .active > a:hover,
-.dropdown-menu > .active > a:focus {
-	background-color: #8FD8F8;
-	color: #1f2d33;
-}
-.privtreeselected {
-	background-color: #8FD8F8;
-	color: #1f2d33;
-}
-div.dojoxGridRowSelected table.dojoxGridRowTable tbody tr td,
-.tundra .dojoxGridRowSelected td {
-	background-color: #8FD8F8;
-}
