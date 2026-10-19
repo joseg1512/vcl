@@ -312,11 +312,20 @@ sub firewall {
 	my $firewall_directory_path = "$FindBin::Bin/../lib/VCL/Module/OS/Linux/firewall";
 	notify($ERRORS{'DEBUG'}, 0, "Linux firewall module directory path: $firewall_directory_path");
 	
-	# Get a list of all *.pm files in the firewall module directory
-	my @firewall_module_paths = $self->mn_os->find_files($firewall_directory_path, '*.pm');
+	# VCL manages the Linux computer firewall with iptables only. The
+	# distribution firewall managers are disabled during the load (see
+	# iptables.pm process_post_load) so the rules inserted by the iptables
+	# module are the only ones evaluated.
+	#
+	# The module directory used to be enumerated with find and the first module
+	# that initialized was used. That order depends on the file system and made
+	# the selection non-deterministic: on Ubuntu ufw.pm could be selected (it
+	# does not insert any reservation rule) and on Red Hat firewalld.pm could be
+	# selected instead of iptables.pm.
+	my @firewall_module_names = qw(iptables);
+	my @firewall_module_paths = map { "$firewall_directory_path/$_.pm" } @firewall_module_names;
 	
-	# Attempt to create an initialize an object for each firewall module
-	my %firewall_module_hash;
+	# Attempt to create and initialize an object for each firewall module
 	FIREWALL_MODULE: for my $firewall_module_path (@firewall_module_paths) {
 		my $firewall_name = fileparse($firewall_module_path, qr/\.pm$/i);
 		my $firewall_perl_package = "VCL::Module::OS::Linux::firewall::$firewall_name";
@@ -355,7 +364,7 @@ sub firewall {
 		}
 	}
 	
-	notify($ERRORS{'DEBUG'}, 0, "unable to initialize suitable specific firewall module, returning generic VCL::Module::OS::Linux::firewall object");
+	notify($ERRORS{'WARNING'}, 0, "unable to initialize a supported firewall module on $computer_node_name (tried: " . join(', ', @firewall_module_names) . "), the computer firewall cannot be managed by VCL");
 	return bless {}, 'VCL::Module::OS::Linux::firewall';
 }
 
