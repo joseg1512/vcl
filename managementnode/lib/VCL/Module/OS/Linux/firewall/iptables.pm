@@ -122,6 +122,11 @@ sub process_post_load {
 	
 	notify($ERRORS{'DEBUG'}, 0, "beginning firewall post-load configuration on $computer_name");
 	
+	# Make sure the distribution firewall manager is not running: VCL uses
+	# iptables for all firewall rules and ufw or firewalld would evaluate their
+	# own rules in addition to the ones inserted by this module.
+	$self->_disable_distribution_firewall();
+	
 	my $timestamp = makedatestring();
 	my $post_load_chain_name = $self->get_post_load_chain_name();
 	
@@ -213,6 +218,61 @@ sub process_post_load {
 
 #//////////////////////////////////////////////////////////////////////////////
 
+=head2 _disable_distribution_firewall
+
+ Parameters  : none
+ Returns     : boolean
+ Description : Disables and stops ufw (Ubuntu) and firewalld (Red Hat) if they
+               are present. VCL uses iptables for all of the firewall rules on
+               Linux, so the distribution firewall managers must not be active:
+               their rules would be evaluated in addition to (or instead of)
+               the rules inserted by this module. Images should already be
+               built with these services disabled, this is a defensive and
+               idempotent check for images captured before that.
+
+=cut
+
+sub _disable_distribution_firewall {
+	my $self = shift;
+	if (ref($self) !~ /VCL::Module/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return 0;
+	}
+	
+	my $computer_name = $self->data->get_computer_short_name();
+	
+	if (!$self->os->command_exists('systemctl')) {
+		notify($ERRORS{'DEBUG'}, 0, "systemctl is not available on $computer_name, distribution firewall services were not checked");
+		return 1;
+	}
+	
+	for my $service_name (qw(ufw firewalld)) {
+		my ($exit_status, $output) = $self->os->execute("systemctl is-active $service_name");
+		my $output_string = (defined($output) ? join('', @$output) : '');
+		if ($output_string !~ /^\s*active\s*$/m) {
+			notify($ERRORS{'DEBUG'}, 0, "$service_name is not active on $computer_name");
+			next;
+		}
+		
+		notify($ERRORS{'OK'}, 0, "disabling $service_name on $computer_name, VCL manages the firewall with iptables");
+		($exit_status, $output) = $self->os->execute("systemctl disable --now $service_name");
+		if (defined($exit_status) && $exit_status ne '0') {
+			notify($ERRORS{'WARNING'}, 0, "failed to disable $service_name on $computer_name, exit status: $exit_status, output:\n" . (defined($output) ? join("\n", @$output) : ''));
+			next;
+		}
+		
+		($exit_status, $output) = $self->os->execute("systemctl is-active $service_name");
+		$output_string = (defined($output) ? join('', @$output) : '');
+		if ($output_string !~ /^\s*(inactive|failed)\s*$/m) {
+			notify($ERRORS{'WARNING'}, 0, "failed to stop $service_name on $computer_name, systemctl is-active output:\n$output_string");
+		}
+	}
+	
+	return 1;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
 =head2 process_reserved
 
  Parameters  : none
@@ -295,21 +355,74 @@ sub process_reserved {
 
 #//////////////////////////////////////////////////////////////////////////////
 
+=head2 get_allowed_source
+
+ Parameters  : $remote_ip_address (optional)
+ Returns     : string or undefined
+ Description : Returns the source address (CIDR) or IP address the reservation
+               connect method ports are opened to. The value comes from the
+               firewall_open_source variable:
+               * not set or empty: 0.0.0.0/0, any address that can reach the
+                 computer (the VPN restricts the access at the network level)
+               * a CIDR or address, for example 10.0.0.0/8: only that network
+               * 'remote': the address stored in reservation.remoteIP, which is
+                 the previous VCL behavior (only the machine that clicked
+                 Connect)
+
+=cut
+
+sub get_allowed_source {
+	my $self = shift;
+	if (ref($self) !~ /VCL::Module/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	
+	my $argument_remote_ip = shift;
+	
+	my $configured_source = get_variable('firewall_open_source', 0);
+	if (!defined($configured_source)) {
+		return '0.0.0.0/0';
+	}
+	
+	$configured_source =~ s/^\s+//;
+	$configured_source =~ s/\s+$//;
+	
+	return '0.0.0.0/0' if ($configured_source eq '');
+	
+	if ($configured_source eq 'remote') {
+		return $argument_remote_ip if (defined($argument_remote_ip) && $argument_remote_ip ne '');
+		return $self->data->get_reservation_remote_ip();
+	}
+	
+	if ($configured_source !~ /^[0-9a-fA-F\.:\/]+$/) {
+		notify($ERRORS{'WARNING'}, 0, "invalid firewall_open_source value '$configured_source', using 0.0.0.0/0");
+		return '0.0.0.0/0';
+	}
+	
+	return $configured_source;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
 =head2 process_inuse
 
  Parameters  : $remote_ip_address (optional)
  Returns     : boolean
  Description : Configures the iptables firewall for the inuse state:
                * A vcl-inuse chain is created if it does not already exist.
-               * Rules are added to the vcl-inuse chain allowing to allow
-                 traffic to the connect method ports from the end user's
-                 specific IP address.
-               * The vcl-reserved chain is deleted if it exists.
+               * Rules are added to the vcl-inuse chain allowing traffic to the
+                 connect method ports from the address returned by
+                 get_allowed_source. By default that is 0.0.0.0/0, so any
+                 address that can reach the computer is allowed once the user
+                 connects. The previous behavior (only the machine that
+                 clicked Connect) is available by setting the
+                 firewall_open_source variable to 'remote'.
+               * The vcl-reserved chain is deleted if it exists, the rules in
+                 the new chain replace it.
                
                This subroutine can be called over and over again. It will not
-               remove rules previously added to the vcl-inuse chain. If a user's
-               remote IP address changes, this subroutine will add a new rule to
-               the vcl-inuse chain.
+               remove rules previously added to the vcl-inuse chain.
 
 =cut
 
@@ -330,9 +443,14 @@ sub process_inuse {
 	
 	my $timestamp = makedatestring();
 	
-	my $remote_ip_address = shift || $self->data->get_reservation_remote_ip();
-	if (!$remote_ip_address) {
-		notify($ERRORS{'WARNING'}, 0, "failed to complete firewall inuse configuration on $computer_name, remote IP could not be retrieved for reservation");
+	# The source address the connect method ports are opened to is controlled by
+	# the firewall_open_source variable: 0.0.0.0/0 (default, any address), a
+	# CIDR such as the VPN network, or 'remote' (previous behavior, only the
+	# address stored in reservation.remoteIP).
+	my $argument_remote_ip = shift;
+	my $allowed_source = $self->get_allowed_source($argument_remote_ip);
+	if (!$allowed_source) {
+		notify($ERRORS{'WARNING'}, 0, "failed to complete firewall inuse configuration on $computer_name, no allowed source could be determined (firewall_open_source is 'remote' and the reservation remote IP is not set)");
 		return;
 	}
 	
@@ -367,7 +485,7 @@ sub process_inuse {
 			{
 				'parameters' => {
 					'protocol' => $protocol,
-					'source' => "$remote_ip_address",
+					'source' => "$allowed_source",
 					'jump' => 'ACCEPT',
 				},
 				'match_extensions' => {
@@ -375,7 +493,7 @@ sub process_inuse {
 						'dport' => $port,
 					},
 					'comment' => {
-						'comment' => "VCL: allow traffic from $remote_ip_address to $protocol/$port during the inuse stage of reservation $reservation_id ($timestamp)",
+						'comment' => "VCL: allow traffic from $allowed_source to $protocol/$port during the inuse stage of reservation $reservation_id ($timestamp)",
 					},
 				},
 			}
@@ -385,7 +503,8 @@ sub process_inuse {
 		}
 	}
 	
-	# Delete the reserved chain which allows traffic from any address
+	# Delete the reserved chain, the rules added to the inuse chain above
+	# replace it
 	$self->delete_chain('filter', $reserved_chain_name);
 	
 	$self->save_configuration();
@@ -2360,7 +2479,9 @@ sub nat_add_port_forward {
  Returns     : boolean
  Description : Saves the current iptables configuration by running
                iptables-save. If no file path argument is provided, the output
-               is saved to /etc/sysconfig/iptables.
+               is saved to /etc/sysconfig/iptables on distributions that have
+               that directory (Red Hat) and to /var/lib/vcl/iptables.save on
+               distributions that do not (Ubuntu).
 
 =cut
 
@@ -2371,7 +2492,20 @@ sub save_configuration {
 		return 0;
 	}
 	
-	my $file_path = shift || '/etc/sysconfig/iptables';
+	my $file_path = shift;
+	if (!$file_path) {
+		# Red Hat keeps the saved rules in /etc/sysconfig/iptables. Ubuntu has no
+		# /etc/sysconfig, so a VCL owned path is used instead. The rules are
+		# re-applied on every reservation stage; this file is only a fallback
+		# for a manual restore.
+		if ($self->os->file_exists('/etc/sysconfig')) {
+			$file_path = '/etc/sysconfig/iptables';
+		}
+		else {
+			$self->os->execute('mkdir -p /var/lib/vcl');
+			$file_path = '/var/lib/vcl/iptables.save';
+		}
+	}
 	
 	my $computer_id = $self->data->get_computer_id();
 	my $computer_name = $self->data->get_computer_hostname();
