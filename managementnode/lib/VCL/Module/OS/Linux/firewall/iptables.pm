@@ -279,7 +279,8 @@ sub _disable_distribution_firewall {
  Returns     : boolean
  Description : Configures the iptables firewall for the reserved state:
                * A vcl-reserved chain is created with rules allowing traffic to
-                 the connect method ports from any IP address.
+                 the connect method ports from any IP address in normal mode
+                 and from firewall_connect_range in range mode.
 
 =cut
 
@@ -304,6 +305,12 @@ sub process_reserved {
 	
 	my $reserved_chain_name = $self->get_reserved_chain_name();
 	
+	# The source address the connect method ports are opened to comes from
+	# vcld.conf: in normal mode the reserved stage accepts traffic from any
+	# address, in range mode only from the configured range.
+	my $allowed_source = $self->get_allowed_source('reserved');
+	my $source_description = defined($allowed_source) ? $allowed_source : 'any IP address';
+	
 	# Delete existing chain if one exists to prevent inconsistent results
 	# Create a chain and add a jump rule to INPUT chain
 	$self->create_chain('filter', $reserved_chain_name);
@@ -326,18 +333,20 @@ sub process_reserved {
 	my @protocol_ports = $self->data->get_connect_method_protocol_port_array();
 	for my $protocol_port (@protocol_ports) {
 		my ($protocol, $port) = @$protocol_port;
+		my %parameters = (
+			'protocol' => $protocol,
+			'jump' => 'ACCEPT',
+		);
+		$parameters{'source'} = $allowed_source if (defined($allowed_source));
 		if (!$self->insert_rule('filter', $reserved_chain_name,
 			{
-				'parameters' => {
-					'protocol' => $protocol,
-					'jump' => 'ACCEPT',
-				},
+				'parameters' => \%parameters,
 				'match_extensions' => {
 					$protocol => {
 						'dport' => $port,
 					},
 					'comment' => {
-						'comment' => "VCL: allow traffic from any IP address to connect method ports during reserved stage of reservation $reservation_id ($timestamp)",
+						'comment' => "VCL: allow traffic from $source_description to connect method ports during reserved stage of reservation $reservation_id ($timestamp)",
 					},
 				},
 			}
@@ -355,19 +364,110 @@ sub process_reserved {
 
 #//////////////////////////////////////////////////////////////////////////////
 
+=head2 get_firewall_config
+
+ Parameters  : none
+ Returns     : hash reference: { mode => 'normal'|'range', range => CIDR or undefined }
+ Description : Resolves how the connect method ports of a reservation are
+               opened from the management node configuration:
+               * firewall_connect_mode=normal (default when the parameter is
+                 not set): the reserved stage has no source restriction and the
+                 inuse stage only allows reservation.remoteIP, which is the
+                 previous VCL behavior.
+               * firewall_connect_mode=range: both stages only allow
+                 firewall_connect_range.
+               The range is IPv4 only. A bare address is treated as a /32 and
+               0.0.0.0 is normalized to 0.0.0.0/0. A missing or invalid range
+               and an unknown mode fall back to normal mode and log a WARNING.
+
+=cut
+
+sub get_firewall_config {
+	my $self = shift;
+	
+	my $mode = $VCL::utils::FIREWALL_CONNECT_MODE;
+	$mode = '' if (!defined($mode));
+	$mode =~ s/^\s+//;
+	$mode =~ s/\s+$//;
+	
+	# Not configured or configured empty: previous behavior
+	return { 'mode' => 'normal', 'range' => undef } if ($mode eq '');
+	
+	return { 'mode' => 'normal', 'range' => undef } if ($mode eq 'normal');
+	
+	if ($mode ne 'range') {
+		notify($ERRORS{'WARNING'}, 0, "invalid firewall_connect_mode value '$mode', supported values are 'normal' and 'range', using normal mode");
+		return { 'mode' => 'normal', 'range' => undef };
+	}
+	
+	my $range = $VCL::utils::FIREWALL_CONNECT_RANGE;
+	$range = '' if (!defined($range));
+	$range =~ s/^\s+//;
+	$range =~ s/\s+$//;
+	
+	if ($range eq '') {
+		notify($ERRORS{'WARNING'}, 0, "firewall_connect_mode is 'range' but firewall_connect_range is not set, using normal mode");
+		return { 'mode' => 'normal', 'range' => undef };
+	}
+	
+	my $normalized_range = $self->_normalize_ipv4_range($range);
+	if (!defined($normalized_range)) {
+		notify($ERRORS{'WARNING'}, 0, "invalid firewall_connect_range value '$range', expected an IPv4 address or CIDR, using normal mode");
+		return { 'mode' => 'normal', 'range' => undef };
+	}
+	
+	return { 'mode' => 'range', 'range' => $normalized_range };
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 _normalize_ipv4_range
+
+ Parameters  : $range (address or CIDR)
+ Returns     : normalized CIDR or undefined if invalid
+ Description : Validates an IPv4 address or CIDR and returns it with an explicit
+               mask. 0.0.0.0 is normalized to 0.0.0.0/0 and an address without
+               a mask gets /32.
+
+=cut
+
+sub _normalize_ipv4_range {
+	my $self = shift;
+	my $range = shift;
+	
+	my ($address, $mask) = $range =~ /^(\d{1,3}(?:\.\d{1,3}){3})(?:\/(\d{1,2}))?$/;
+	return if (!defined($address));
+	
+	for my $octet (split(/\./, $address)) {
+		return if ($octet > 255);
+	}
+	
+	if (!defined($mask)) {
+		# A single address is a single host, 0.0.0.0 means any address
+		$mask = ($address eq '0.0.0.0') ? 0 : 32;
+	}
+	elsif ($mask > 32) {
+		return;
+	}
+	
+	return "$address/$mask";
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
 =head2 get_allowed_source
 
- Parameters  : $remote_ip_address (optional)
+ Parameters  : $stage ('reserved' or 'inuse'), $remote_ip_address (optional)
  Returns     : string or undefined
- Description : Returns the source address (CIDR) or IP address the reservation
-               connect method ports are opened to. The value comes from the
-               firewall_open_source variable:
-               * not set or empty: 0.0.0.0/0, any address that can reach the
-                 computer (the VPN restricts the access at the network level)
-               * a CIDR or address, for example 10.0.0.0/8: only that network
-               * 'remote': the address stored in reservation.remoteIP, which is
-                 the previous VCL behavior (only the machine that clicked
-                 Connect)
+ Description : Returns the source address (CIDR) or IP address the connect
+               method ports are opened to for the given stage, based on the
+               firewall configuration returned by get_firewall_config:
+               * normal mode: the reserved stage has no source restriction
+                 (undefined is returned) and the inuse stage only allows the
+                 remote IP address of the Connect request (undefined is
+                 returned if it is not available)
+               * range mode: the configured range is returned for both stages
+               Undefined means no source restriction is applied to the rule.
 
 =cut
 
@@ -378,29 +478,26 @@ sub get_allowed_source {
 		return;
 	}
 	
+	my $argument_stage = shift;
 	my $argument_remote_ip = shift;
 	
-	my $configured_source = get_variable('firewall_open_source', 0);
-	if (!defined($configured_source)) {
-		return '0.0.0.0/0';
+	my $firewall_config = $self->get_firewall_config();
+	
+	# In range mode the configured range is the only allowed source, in both
+	# the reserved and the inuse stage
+	return $firewall_config->{range} if ($firewall_config->{mode} eq 'range');
+	
+	# In normal mode the reserved stage has to accept the Connect request from
+	# any address
+	return if (!defined($argument_stage) || $argument_stage ne 'inuse');
+	
+	if (defined($argument_remote_ip)) {
+		$argument_remote_ip =~ s/^\s+//;
+		$argument_remote_ip =~ s/\s+$//;
+		return if ($argument_remote_ip eq '');
 	}
 	
-	$configured_source =~ s/^\s+//;
-	$configured_source =~ s/\s+$//;
-	
-	return '0.0.0.0/0' if ($configured_source eq '');
-	
-	if ($configured_source eq 'remote') {
-		return $argument_remote_ip if (defined($argument_remote_ip) && $argument_remote_ip ne '');
-		return $self->data->get_reservation_remote_ip();
-	}
-	
-	if ($configured_source !~ /^[0-9a-fA-F\.:\/]+$/) {
-		notify($ERRORS{'WARNING'}, 0, "invalid firewall_open_source value '$configured_source', using 0.0.0.0/0");
-		return '0.0.0.0/0';
-	}
-	
-	return $configured_source;
+	return $argument_remote_ip;
 }
 
 #//////////////////////////////////////////////////////////////////////////////
@@ -413,11 +510,9 @@ sub get_allowed_source {
                * A vcl-inuse chain is created if it does not already exist.
                * Rules are added to the vcl-inuse chain allowing traffic to the
                  connect method ports from the address returned by
-                 get_allowed_source. By default that is 0.0.0.0/0, so any
-                 address that can reach the computer is allowed once the user
-                 connects. The previous behavior (only the machine that
-                 clicked Connect) is available by setting the
-                 firewall_open_source variable to 'remote'.
+                 get_allowed_source. In normal mode that is the remote IP
+                 address of the Connect request (previous VCL behavior), in
+                 range mode it is firewall_connect_range.
                * The vcl-reserved chain is deleted if it exists, the rules in
                  the new chain replace it.
                
@@ -443,14 +538,13 @@ sub process_inuse {
 	
 	my $timestamp = makedatestring();
 	
-	# The source address the connect method ports are opened to is controlled by
-	# the firewall_open_source variable: 0.0.0.0/0 (default, any address), a
-	# CIDR such as the VPN network, or 'remote' (previous behavior, only the
-	# address stored in reservation.remoteIP).
+	# The source address the connect method ports are opened to comes from
+	# vcld.conf: in normal mode only the remote IP address of the Connect
+	# request is allowed, in range mode the configured range is used.
 	my $argument_remote_ip = shift;
-	my $allowed_source = $self->get_allowed_source($argument_remote_ip);
+	my $allowed_source = $self->get_allowed_source('inuse', $argument_remote_ip);
 	if (!$allowed_source) {
-		notify($ERRORS{'WARNING'}, 0, "failed to complete firewall inuse configuration on $computer_name, no allowed source could be determined (firewall_open_source is 'remote' and the reservation remote IP is not set)");
+		notify($ERRORS{'WARNING'}, 0, "failed to complete firewall inuse configuration on $computer_name, no allowed source could be determined (firewall_connect_mode is 'normal' and the Connect remote IP is not set)");
 		return;
 	}
 	
