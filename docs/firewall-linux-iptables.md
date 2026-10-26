@@ -22,7 +22,7 @@ Las reglas se insertan al principio de `INPUT` (`iptables --insert`), por encima
 
 ## Configuración en `vcld.conf`
 
-Se configura en `/etc/vcl/vcld.conf` del nodo de gestión. La plantilla instalada (`managementnode/etc/vcl/vcld.conf`) ya trae las dos claves documentadas.
+Se configura en `/etc/vcl/vcld.conf` del nodo de gestión. La plantilla instalada (`managementnode/etc/vcl/vcld.conf`) ya trae las dos claves documentadas; eso aplica a una instalación nueva. En una actualización, `vcl-upgrade.sh` no toca `/etc/vcl/vcld.conf`: hay que agregarlas a mano. Si faltan, el comportamiento es el actual (modo `normal`), sin error.
 
 | `FIREWALL_CONNECT_MODE` | `FIREWALL_CONNECT_RANGE` | Origen en `reserved` | Origen en `inuse` |
 | --- | --- | --- | --- |
@@ -59,6 +59,8 @@ FIREWALL_CONNECT_RANGE=10.0.0.7
 Los valores se leen cuando se carga el módulo, al arrancar `vcld`: hay que reiniciar el demonio para que un cambio tenga efecto. Las reservas en curso no se ven afectadas hasta el siguiente Connect.
 
 Un valor inválido no impide la reserva: el módulo cae a modo `normal` y deja un `WARNING` en el log del nodo de gestión (`/var/log/vcld.log`). Eso cubre un modo desconocido, `range` sin rango y un rango que no es una IPv4 válida.
+
+Ojo con dos consecuencias de ese fallback: un `FIREWALL_CONNECT_RANGE` inválido con `FIREWALL_CONNECT_MODE=normal` no genera ningún `WARNING`, porque en modo `normal` el rango ni se lee; y caer a `normal` deja la etapa `reserved` abierta a cualquier dirección alcanzable (solo `inuse` queda limitada a la IP que hizo el Connect). Si esperaba un rango, verifique `/var/log/vcld.log` antes de asumir que se aplicó.
 
 ## Selección del módulo
 
@@ -103,12 +105,13 @@ Desde otra máquina de la red: en modo `normal` solo la que hizo el Connect debe
 
 ## Tests
 
-No hay runner en CI: los tests se corren a mano, con `perl`, desde la raíz del repositorio.
+No hay runner en CI: los tests se corren a mano, desde la raíz del repositorio.
 
 ```sh
-cd ~/vcl-src/vcl
 perl managementnode/tests/firewall/test_vcld_conf.pl
 perl managementnode/tests/firewall/test_allowed_source.pl
+perl managementnode/tests/firewall/test_ubuntu_paths.pl
+managementnode/tests/run_firewall_tests.sh
 ```
 
-`test_vcld_conf.pl` verifica que las claves se lean del archivo de configuración y `test_allowed_source.pl` cubre la resolución del origen por modo, rango y etapa. Ambos imprimen una línea por caso y salen con código distinto de cero si algún caso falla.
+`test_vcld_conf.pl` verifica que las claves se lean del archivo de configuración (y que ausentes queden indefinidas), `test_allowed_source.pl` cubre la resolución del origen por modo, rango y etapa, y `test_ubuntu_paths.pl` cubre con stubs las decisiones de las rutas Ubuntu (desactivar `ufw`/`firewalld` y la ruta del archivo de `iptables-save`). Todos imprimen una línea por caso y salen con código distinto de cero si algún caso falla; `run_firewall_tests.sh` corre los tres y devuelve el peor código de salida.

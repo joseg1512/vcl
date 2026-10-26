@@ -385,10 +385,8 @@ sub process_reserved {
 sub get_firewall_config {
 	my $self = shift;
 	
-	my $mode = $VCL::utils::FIREWALL_CONNECT_MODE;
+	my $mode = $self->_trim($VCL::utils::FIREWALL_CONNECT_MODE);
 	$mode = '' if (!defined($mode));
-	$mode =~ s/^\s+//;
-	$mode =~ s/\s+$//;
 	
 	# Not configured or configured empty: previous behavior
 	return { 'mode' => 'normal', 'range' => undef } if ($mode eq '');
@@ -396,27 +394,46 @@ sub get_firewall_config {
 	return { 'mode' => 'normal', 'range' => undef } if ($mode eq 'normal');
 	
 	if ($mode ne 'range') {
-		notify($ERRORS{'WARNING'}, 0, "invalid firewall_connect_mode value '$mode', supported values are 'normal' and 'range', using normal mode");
+		notify($ERRORS{'WARNING'}, 0, "invalid firewall_connect_mode value '$mode', supported values are 'normal' and 'range', using normal mode, the reserved stage will accept any address");
 		return { 'mode' => 'normal', 'range' => undef };
 	}
 	
-	my $range = $VCL::utils::FIREWALL_CONNECT_RANGE;
+	my $range = $self->_trim($VCL::utils::FIREWALL_CONNECT_RANGE);
 	$range = '' if (!defined($range));
-	$range =~ s/^\s+//;
-	$range =~ s/\s+$//;
 	
 	if ($range eq '') {
-		notify($ERRORS{'WARNING'}, 0, "firewall_connect_mode is 'range' but firewall_connect_range is not set, using normal mode");
+		notify($ERRORS{'WARNING'}, 0, "firewall_connect_mode is 'range' but firewall_connect_range is not set, using normal mode, the reserved stage will accept any address");
 		return { 'mode' => 'normal', 'range' => undef };
 	}
 	
 	my $normalized_range = $self->_normalize_ipv4_range($range);
 	if (!defined($normalized_range)) {
-		notify($ERRORS{'WARNING'}, 0, "invalid firewall_connect_range value '$range', expected an IPv4 address or CIDR, using normal mode");
+		notify($ERRORS{'WARNING'}, 0, "invalid firewall_connect_range value '$range', expected an IPv4 address or CIDR, using normal mode, the reserved stage will accept any address");
 		return { 'mode' => 'normal', 'range' => undef };
 	}
 	
 	return { 'mode' => 'range', 'range' => $normalized_range };
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 _trim
+
+ Parameters  : $value (string or undefined)
+ Returns     : the string without leading and trailing whitespace, or undefined
+               if the argument is undefined
+ Description : Removes leading and trailing whitespace. Used for the values read
+               from vcld.conf and for the Connect remote IP address, which may
+               arrive padded with whitespace.
+
+=cut
+
+sub _trim {
+	my $self = shift;
+	my $value = shift;
+	return if (!defined($value));
+	$value =~ s/^\s+|\s+$//g;
+	return $value;
 }
 
 #//////////////////////////////////////////////////////////////////////////////
@@ -468,6 +485,7 @@ sub _normalize_ipv4_range {
                  returned if it is not available)
                * range mode: the configured range is returned for both stages
                Undefined means no source restriction is applied to the rule.
+               Any other stage value logs a WARNING and returns undefined.
 
 =cut
 
@@ -481,19 +499,26 @@ sub get_allowed_source {
 	my $argument_stage = shift;
 	my $argument_remote_ip = shift;
 	
+	my @supported_stages = qw(reserved inuse);
+	if (!defined($argument_stage) || !grep { $_ eq $argument_stage } @supported_stages) {
+		notify($ERRORS{'WARNING'}, 0, "invalid stage argument passed to get_allowed_source: '" . (defined($argument_stage) ? $argument_stage : '<undef>') . "', supported stages are 'reserved' and 'inuse'");
+		return;
+	}
+	
 	my $firewall_config = $self->get_firewall_config();
 	
 	# In range mode the configured range is the only allowed source, in both
 	# the reserved and the inuse stage
-	return $firewall_config->{range} if ($firewall_config->{mode} eq 'range');
+	if ($firewall_config->{mode} eq 'range' && defined($firewall_config->{range})) {
+		return $firewall_config->{range};
+	}
 	
 	# In normal mode the reserved stage has to accept the Connect request from
 	# any address
-	return if (!defined($argument_stage) || $argument_stage ne 'inuse');
+	return if ($argument_stage ne 'inuse');
 	
 	if (defined($argument_remote_ip)) {
-		$argument_remote_ip =~ s/^\s+//;
-		$argument_remote_ip =~ s/\s+$//;
+		$argument_remote_ip = $self->_trim($argument_remote_ip);
 		return if ($argument_remote_ip eq '');
 	}
 	
