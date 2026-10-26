@@ -364,6 +364,9 @@ our $RETURNPATH;
 
 our $WINDOWS_ROOT_PASSWORD;
 
+our $FIREWALL_CONNECT_MODE;
+our $FIREWALL_CONNECT_RANGE;
+
 our $XMLRPC_USER;
 our $XMLRPC_PASS;
 our $XMLRPC_URL;
@@ -431,6 +434,8 @@ INIT {
 		'jabresource'				=> \$JABBER_RESOURCE,
 		'processname'				=> \$PROCESSNAME,
 		'windows_root_password'	=> \$WINDOWS_ROOT_PASSWORD,
+		'firewall_connect_mode'		=> \$FIREWALL_CONNECT_MODE,
+		'firewall_connect_range'	=> \$FIREWALL_CONNECT_RANGE,
 		'verbose'					=> \$VERBOSE,
 		'defaulthelpemail'		=> \$DEFAULTHELPEMAIL,
 	);
