@@ -279,8 +279,8 @@ sub _disable_distribution_firewall {
  Returns     : boolean
  Description : Configures the iptables firewall for the reserved state:
                * A vcl-reserved chain is created with rules allowing traffic to
-                 the connect method ports from any IP address in normal mode
-                 and from firewall_connect_range in range mode.
+                 the connect method ports from any IP address in button mode
+                 and from connect_ip_range in ip_range mode.
 
 =cut
 
@@ -306,8 +306,8 @@ sub process_reserved {
 	my $reserved_chain_name = $self->get_reserved_chain_name();
 	
 	# The source address the connect method ports are opened to comes from
-	# vcld.conf: in normal mode the reserved stage accepts traffic from any
-	# address, in range mode only from the configured range.
+	# vcld.conf: in button mode the reserved stage accepts traffic from any
+	# address, in ip_range mode only from the configured range.
 	my $allowed_source = $self->get_allowed_source('reserved');
 	my $source_description = defined($allowed_source) ? $allowed_source : 'any IP address';
 	
@@ -367,52 +367,52 @@ sub process_reserved {
 =head2 get_firewall_config
 
  Parameters  : none
- Returns     : hash reference: { mode => 'normal'|'range', range => CIDR or undefined }
+ Returns     : hash reference: { mode => 'button'|'ip_range', range => CIDR or undefined }
  Description : Resolves how the connect method ports of a reservation are
                opened from the management node configuration:
-               * firewall_connect_mode=normal (default when the parameter is
+               * connect_mode=button (default when the parameter is
                  not set): the reserved stage has no source restriction and the
                  inuse stage only allows reservation.remoteIP, which is the
                  previous VCL behavior.
-               * firewall_connect_mode=range: both stages only allow
-                 firewall_connect_range.
+               * connect_mode=ip_range: both stages only allow
+                 connect_ip_range.
                The range is IPv4 only. A bare address is treated as a /32 and
                0.0.0.0 is normalized to 0.0.0.0/0. A missing or invalid range
-               and an unknown mode fall back to normal mode and log a WARNING.
+               and an unknown mode fall back to button mode and log a WARNING.
 
 =cut
 
 sub get_firewall_config {
 	my $self = shift;
 	
-	my $mode = $self->_trim($VCL::utils::FIREWALL_CONNECT_MODE);
+	my $mode = $self->_trim($VCL::utils::CONNECT_MODE);
 	$mode = '' if (!defined($mode));
 	
 	# Not configured or configured empty: previous behavior
-	return { 'mode' => 'normal', 'range' => undef } if ($mode eq '');
+	return { 'mode' => 'button', 'range' => undef } if ($mode eq '');
 	
-	return { 'mode' => 'normal', 'range' => undef } if ($mode eq 'normal');
+	return { 'mode' => 'button', 'range' => undef } if ($mode eq 'button');
 	
-	if ($mode ne 'range') {
-		notify($ERRORS{'WARNING'}, 0, "invalid firewall_connect_mode value '$mode', supported values are 'normal' and 'range', using normal mode, the reserved stage will accept any address");
-		return { 'mode' => 'normal', 'range' => undef };
+	if ($mode ne 'ip_range') {
+		notify($ERRORS{'WARNING'}, 0, "invalid connect_mode value '$mode', supported values are 'button' and 'ip_range', using button mode, the reserved stage will accept any address");
+		return { 'mode' => 'button', 'range' => undef };
 	}
 	
-	my $range = $self->_trim($VCL::utils::FIREWALL_CONNECT_RANGE);
+	my $range = $self->_trim($VCL::utils::CONNECT_IP_RANGE);
 	$range = '' if (!defined($range));
 	
 	if ($range eq '') {
-		notify($ERRORS{'WARNING'}, 0, "firewall_connect_mode is 'range' but firewall_connect_range is not set, using normal mode, the reserved stage will accept any address");
-		return { 'mode' => 'normal', 'range' => undef };
+		notify($ERRORS{'WARNING'}, 0, "connect_mode is 'ip_range' but connect_ip_range is not set, using button mode, the reserved stage will accept any address");
+		return { 'mode' => 'button', 'range' => undef };
 	}
 	
 	my $normalized_range = $self->_normalize_ipv4_range($range);
 	if (!defined($normalized_range)) {
-		notify($ERRORS{'WARNING'}, 0, "invalid firewall_connect_range value '$range', expected an IPv4 address or CIDR, using normal mode, the reserved stage will accept any address");
-		return { 'mode' => 'normal', 'range' => undef };
+		notify($ERRORS{'WARNING'}, 0, "invalid connect_ip_range value '$range', expected an IPv4 address or CIDR, using button mode, the reserved stage will accept any address");
+		return { 'mode' => 'button', 'range' => undef };
 	}
 	
-	return { 'mode' => 'range', 'range' => $normalized_range };
+	return { 'mode' => 'ip_range', 'range' => $normalized_range };
 }
 
 #//////////////////////////////////////////////////////////////////////////////
@@ -479,11 +479,11 @@ sub _normalize_ipv4_range {
  Description : Returns the source address (CIDR) or IP address the connect
                method ports are opened to for the given stage, based on the
                firewall configuration returned by get_firewall_config:
-               * normal mode: the reserved stage has no source restriction
+               * button mode: the reserved stage has no source restriction
                  (undefined is returned) and the inuse stage only allows the
                  remote IP address of the Connect request (undefined is
                  returned if it is not available)
-               * range mode: the configured range is returned for both stages
+               * ip_range mode: the configured range is returned for both stages
                Undefined means no source restriction is applied to the rule.
                Any other stage value logs a WARNING and returns undefined.
 
@@ -507,13 +507,13 @@ sub get_allowed_source {
 	
 	my $firewall_config = $self->get_firewall_config();
 	
-	# In range mode the configured range is the only allowed source, in both
+	# In ip_range mode the configured range is the only allowed source, in both
 	# the reserved and the inuse stage
-	if ($firewall_config->{mode} eq 'range' && defined($firewall_config->{range})) {
+	if ($firewall_config->{mode} eq 'ip_range' && defined($firewall_config->{range})) {
 		return $firewall_config->{range};
 	}
 	
-	# In normal mode the reserved stage has to accept the Connect request from
+	# In button mode the reserved stage has to accept the Connect request from
 	# any address
 	return if ($argument_stage ne 'inuse');
 	
@@ -535,9 +535,9 @@ sub get_allowed_source {
                * A vcl-inuse chain is created if it does not already exist.
                * Rules are added to the vcl-inuse chain allowing traffic to the
                  connect method ports from the address returned by
-                 get_allowed_source. In normal mode that is the remote IP
+                 get_allowed_source. In button mode that is the remote IP
                  address of the Connect request (previous VCL behavior), in
-                 range mode it is firewall_connect_range.
+                 ip_range mode it is connect_ip_range.
                * The vcl-reserved chain is deleted if it exists, the rules in
                  the new chain replace it.
                
@@ -564,12 +564,12 @@ sub process_inuse {
 	my $timestamp = makedatestring();
 	
 	# The source address the connect method ports are opened to comes from
-	# vcld.conf: in normal mode only the remote IP address of the Connect
-	# request is allowed, in range mode the configured range is used.
+	# vcld.conf: in button mode only the remote IP address of the Connect
+	# request is allowed, in ip_range mode the configured range is used.
 	my $argument_remote_ip = shift;
 	my $allowed_source = $self->get_allowed_source('inuse', $argument_remote_ip);
 	if (!$allowed_source) {
-		notify($ERRORS{'WARNING'}, 0, "failed to complete firewall inuse configuration on $computer_name, no allowed source could be determined (firewall_connect_mode is 'normal' and the Connect remote IP is not set)");
+		notify($ERRORS{'WARNING'}, 0, "failed to complete firewall inuse configuration on $computer_name, no allowed source could be determined (connect_mode is 'button' and the Connect remote IP is not set)");
 		return;
 	}
 	

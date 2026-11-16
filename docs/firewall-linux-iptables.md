@@ -6,15 +6,15 @@ VCL configura el firewall de las computadoras Linux en cada etapa de la reserva.
 
 Cuando el usuario hace clic en Connect, los puertos de los connect methods de la imagen (SSH, RDP) se abren al origen que indica la configuración del nodo de gestión:
 
-- `normal` (por defecto): los puertos se abren solo a la dirección que hizo el Connect, guardada en `reservation.remoteIP`. Es el comportamiento estándar de VCL.
-- `range`: los puertos se abren al rango configurado, tanto en la etapa `reserved` como en la etapa `inuse`.
+- `button` (por defecto): los puertos se abren solo a la dirección que hizo el Connect, guardada en `reservation.remoteIP`. Es el comportamiento estándar de VCL.
+- `ip_range`: los puertos se abren al rango configurado, tanto en la etapa `reserved` como en la etapa `inuse`.
 
 ## Etapas y cadenas
 
 El módulo `managementnode/lib/VCL/Module/OS/Linux/firewall/iptables.pm` crea una cadena por etapa y una regla en `INPUT` que salta a ella:
 
 - `post_load`: cadena `vcl-post_load`, permite el tráfico desde las IPs de la máquina de gestión.
-- `reserved`: cadena `vcl-reserved`, abre los puertos de los connect methods al origen de la etapa (sin restricción en modo `normal`).
+- `reserved`: cadena `vcl-reserved`, abre los puertos de los connect methods al origen de la etapa (sin restricción en modo `button`).
 - `inuse` (al hacer Connect): cadena `vcl-inuse`, abre esos puertos al origen de la etapa y borra `vcl-reserved`.
 - `sanitize` y `pre_capture`: cierran y limpian las cadenas.
 
@@ -22,14 +22,14 @@ Las reglas se insertan al principio de `INPUT` (`iptables --insert`), por encima
 
 ## Configuración en `vcld.conf`
 
-Se configura en `/etc/vcl/vcld.conf` del nodo de gestión. La plantilla instalada (`managementnode/etc/vcl/vcld.conf`) ya trae las dos claves documentadas; eso aplica a una instalación nueva. En una actualización, `vcl-upgrade.sh` no toca `/etc/vcl/vcld.conf`: hay que agregarlas a mano. Si faltan, el comportamiento es el actual (modo `normal`), sin error.
+Se configura en `/etc/vcl/vcld.conf` del nodo de gestión. La plantilla instalada (`managementnode/etc/vcl/vcld.conf`) ya trae las dos claves documentadas; eso aplica a una instalación nueva. En una actualización, `vcl-upgrade.sh` no toca `/etc/vcl/vcld.conf`: hay que agregarlas a mano. Si faltan, el comportamiento es el actual (modo `button`), sin error.
 
-| `FIREWALL_CONNECT_MODE` | `FIREWALL_CONNECT_RANGE` | Origen en `reserved` | Origen en `inuse` |
+| `CONNECT_MODE` | `CONNECT_IP_RANGE` | Origen en `reserved` | Origen en `inuse` |
 | --- | --- | --- | --- |
-| ausente, vacío o `normal` | se ignora | sin restricción | `reservation.remoteIP` |
-| `range` | rango IPv4 | el rango | el rango |
+| ausente, vacío o `button` | se ignora | sin restricción | `reservation.remoteIP` |
+| `ip_range` | rango IPv4 | el rango | el rango |
 
-`FIREWALL_CONNECT_RANGE` es IPv4 únicamente y acepta:
+`CONNECT_IP_RANGE` es IPv4 únicamente y acepta:
 
 | Valor | Equivale a | Efecto |
 | --- | --- | --- |
@@ -41,26 +41,26 @@ Ejemplos:
 
 ```sh
 # comportamiento estándar de VCL: solo la IP que hizo el Connect
-FIREWALL_CONNECT_MODE=normal
+CONNECT_MODE=button
 
 # solo la red del campus, en reserved y en inuse
-FIREWALL_CONNECT_MODE=range
-FIREWALL_CONNECT_RANGE=10.0.0.0/8
+CONNECT_MODE=ip_range
+CONNECT_IP_RANGE=10.0.0.0/8
 
 # cualquier dirección IPv4 (útil detrás de una VPN que ya filtra)
-FIREWALL_CONNECT_MODE=range
-FIREWALL_CONNECT_RANGE=0.0.0.0
+CONNECT_MODE=ip_range
+CONNECT_IP_RANGE=0.0.0.0
 
 # una sola dirección
-FIREWALL_CONNECT_MODE=range
-FIREWALL_CONNECT_RANGE=10.0.0.7
+CONNECT_MODE=ip_range
+CONNECT_IP_RANGE=10.0.0.7
 ```
 
 Los valores se leen cuando se carga el módulo, al arrancar `vcld`: hay que reiniciar el demonio para que un cambio tenga efecto. Las reservas en curso no se ven afectadas hasta el siguiente Connect.
 
-Un valor inválido no impide la reserva: el módulo cae a modo `normal` y deja un `WARNING` en el log del nodo de gestión (`/var/log/vcld.log`). Eso cubre un modo desconocido, `range` sin rango y un rango que no es una IPv4 válida.
+Un valor inválido no impide la reserva: el módulo cae a modo `button` y deja un `WARNING` en el log del nodo de gestión (`/var/log/vcld.log`). Eso cubre un modo desconocido, `ip_range` sin rango y un rango que no es una IPv4 válida.
 
-Ojo con dos consecuencias de ese fallback: un `FIREWALL_CONNECT_RANGE` inválido con `FIREWALL_CONNECT_MODE=normal` no genera ningún `WARNING`, porque en modo `normal` el rango ni se lee; y caer a `normal` deja la etapa `reserved` abierta a cualquier dirección alcanzable (solo `inuse` queda limitada a la IP que hizo el Connect). Si esperaba un rango, verifique `/var/log/vcld.log` antes de asumir que se aplicó.
+Ojo con dos consecuencias de ese fallback: un `CONNECT_IP_RANGE` inválido con `CONNECT_MODE=button` no genera ningún `WARNING`, porque en modo `button` el rango ni se lee; y caer a `button` deja la etapa `reserved` abierta a cualquier dirección alcanzable (solo `inuse` queda limitada a la IP que hizo el Connect). Si esperaba un rango, verifique `/var/log/vcld.log` antes de asumir que se aplicó.
 
 ## Selección del módulo
 
@@ -81,15 +81,15 @@ Con eso, las reglas de VCL son las únicas que se evalúan durante la reserva.
 Volver al comportamiento estándar de VCL:
 
 ```sh
-FIREWALL_CONNECT_MODE=normal
+CONNECT_MODE=button
 ```
 
 y reiniciar `vcld`. No requiere cambios de código ni volver a desplegar.
 
 ## Fuera de alcance
 
-- IPv6: VCL maneja solo `iptables` (IPv4). En modo `normal` el origen es la IPv4 de `reservation.remoteIP`; si el Connect llega por IPv6 no hay regla IPv6 que aplicar y el acceso queda sujeto a las reglas de la imagen. Replicar el comportamiento con `ip6tables` no está implementado.
-- Windows Server: el mismo comportamiento requiere reglas de `netsh` con `scope = ALL` para abrir a cualquier origen, y ese valor solo se aplica cuando el origen es exactamente `0.0.0.0/0.0.0.0`. No está implementado: `FIREWALL_CONNECT_MODE` y `FIREWALL_CONNECT_RANGE` solo afectan a las computadoras Linux.
+- IPv6: VCL maneja solo `iptables` (IPv4). En modo `button` el origen es la IPv4 de `reservation.remoteIP`; si el Connect llega por IPv6 no hay regla IPv6 que aplicar y el acceso queda sujeto a las reglas de la imagen. Replicar el comportamiento con `ip6tables` no está implementado.
+- Windows Server: el mismo comportamiento requiere reglas de `netsh` con `scope = ALL` para abrir a cualquier origen, y ese valor solo se aplica cuando el origen es exactamente `0.0.0.0/0.0.0.0`. No está implementado: `CONNECT_MODE` y `CONNECT_IP_RANGE` solo afectan a las computadoras Linux.
 
 ## Verificación
 
@@ -101,7 +101,7 @@ systemctl is-active ufw      # inactive en Ubuntu
 systemctl is-active firewalld # inactive en Red Hat
 ```
 
-Desde otra máquina de la red: en modo `normal` solo la que hizo el Connect debe alcanzar el puerto de SSH o RDP hasta el login; en modo `range`, cualquier dirección del rango debe alcanzarlo.
+Desde otra máquina de la red: en modo `button` solo la que hizo el Connect debe alcanzar el puerto de SSH o RDP hasta el login; en modo `ip_range`, cualquier dirección del rango debe alcanzarlo.
 
 ## Tests
 

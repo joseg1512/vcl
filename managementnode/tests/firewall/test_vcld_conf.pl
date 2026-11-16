@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 ###############################################################################
-# Unit test for the firewall_connect_* globals that VCL::utils reads from
-# vcld.conf.
+# Unit test for the connect_mode/connect_ip_range globals that VCL::utils
+# reads from vcld.conf.
 #
 # VCL::utils parses the configuration file in its INIT block (by default
 # /etc/vcl/vcld.conf, which only root can read), so a throwaway configuration
@@ -26,7 +26,7 @@ BEGIN {
 	# File::Temp deletes the file as soon as the handle is closed.
 	my $content = defined($ENV{VCL_FW_TEST_CONF_CONTENT})
 		? $ENV{VCL_FW_TEST_CONF_CONTENT}
-		: "FQDN=test.example.org\nFIREWALL_CONNECT_MODE=range\nFIREWALL_CONNECT_RANGE = 10.0.0.0/8\n";
+		: "FQDN=test.example.org\nCONNECT_MODE=ip_range\nCONNECT_IP_RANGE = 10.0.0.0/8\n";
 	
 	my ($fh, $conf) = tempfile('vcl-fw-test-vcld-XXXXXX', UNLINK => 1);
 	print $fh $content;
@@ -42,17 +42,17 @@ use lib "$FindBin::Bin/../../lib";
 use VCL::utils;
 
 if ($print_keys_only) {
-	printf "FIREWALL_CONNECT_MODE=%s\nFIREWALL_CONNECT_RANGE=%s\n",
-		(defined($VCL::utils::FIREWALL_CONNECT_MODE) ? $VCL::utils::FIREWALL_CONNECT_MODE : '<undef>'),
-		(defined($VCL::utils::FIREWALL_CONNECT_RANGE) ? $VCL::utils::FIREWALL_CONNECT_RANGE : '<undef>');
+	printf "CONNECT_MODE=%s\nCONNECT_IP_RANGE=%s\n",
+		(defined($VCL::utils::CONNECT_MODE) ? $VCL::utils::CONNECT_MODE : '<undef>'),
+		(defined($VCL::utils::CONNECT_IP_RANGE) ? $VCL::utils::CONNECT_IP_RANGE : '<undef>');
 	exit(0);
 }
 
 my $failures = 0;
 
 for my $case (
-	[ 'FIREWALL_CONNECT_MODE',  'range',         $VCL::utils::FIREWALL_CONNECT_MODE ],
-	[ 'FIREWALL_CONNECT_RANGE', '10.0.0.0/8',    $VCL::utils::FIREWALL_CONNECT_RANGE ],
+	[ 'CONNECT_MODE',   'ip_range',    $VCL::utils::CONNECT_MODE ],
+	[ 'CONNECT_IP_RANGE', '10.0.0.0/8',  $VCL::utils::CONNECT_IP_RANGE ],
 ) {
 	my ($name, $expected, $got) = @$case;
 	my $ok = (defined($got) && $got eq $expected);
@@ -61,7 +61,7 @@ for my $case (
 }
 
 # Un vcld.conf sin las claves: las dos quedan indefinidas y el módulo usa el
-# comportamiento por defecto (modo normal).
+# comportamiento por defecto (modo button).
 local $ENV{VCL_FW_TEST_CONF_CONTENT} = "FQDN=test.example.org\n";
 
 my @child_lines;
@@ -83,7 +83,7 @@ for my $line (@child_lines) {
 	$child_values{$1} = $2 if ($line =~ /^(\w+)=(.*)$/);
 }
 
-for my $name (qw(FIREWALL_CONNECT_MODE FIREWALL_CONNECT_RANGE)) {
+for my $name (qw(CONNECT_MODE CONNECT_IP_RANGE)) {
 	my $got = $child_values{$name};
 	my $ok = ($child_exit_status == 0 && defined($got) && $got eq '<undef>');
 	$failures++ if !$ok;
