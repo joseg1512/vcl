@@ -122,6 +122,11 @@ sub process_post_load {
 	
 	notify($ERRORS{'DEBUG'}, 0, "beginning firewall post-load configuration on $computer_name");
 	
+	# Make sure the distribution firewall manager is not running: VCL uses
+	# iptables for all firewall rules and ufw or firewalld would evaluate their
+	# own rules in addition to the ones inserted by this module.
+	$self->_disable_distribution_firewall();
+	
 	my $timestamp = makedatestring();
 	my $post_load_chain_name = $self->get_post_load_chain_name();
 	
@@ -213,13 +218,69 @@ sub process_post_load {
 
 #//////////////////////////////////////////////////////////////////////////////
 
+=head2 _disable_distribution_firewall
+
+ Parameters  : none
+ Returns     : boolean
+ Description : Disables and stops ufw (Ubuntu) and firewalld (Red Hat) if they
+               are present. VCL uses iptables for all of the firewall rules on
+               Linux, so the distribution firewall managers must not be active:
+               their rules would be evaluated in addition to (or instead of)
+               the rules inserted by this module. Images should already be
+               built with these services disabled, this is a defensive and
+               idempotent check for images captured before that.
+
+=cut
+
+sub _disable_distribution_firewall {
+	my $self = shift;
+	if (ref($self) !~ /VCL::Module/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return 0;
+	}
+	
+	my $computer_name = $self->data->get_computer_short_name();
+	
+	if (!$self->os->command_exists('systemctl')) {
+		notify($ERRORS{'DEBUG'}, 0, "systemctl is not available on $computer_name, distribution firewall services were not checked");
+		return 1;
+	}
+	
+	for my $service_name (qw(ufw firewalld)) {
+		my ($exit_status, $output) = $self->os->execute("systemctl is-active $service_name");
+		my $output_string = (defined($output) ? join('', @$output) : '');
+		if ($output_string !~ /^\s*active\s*$/m) {
+			notify($ERRORS{'DEBUG'}, 0, "$service_name is not active on $computer_name");
+			next;
+		}
+		
+		notify($ERRORS{'OK'}, 0, "disabling $service_name on $computer_name, VCL manages the firewall with iptables");
+		($exit_status, $output) = $self->os->execute("systemctl disable --now $service_name");
+		if (defined($exit_status) && $exit_status ne '0') {
+			notify($ERRORS{'WARNING'}, 0, "failed to disable $service_name on $computer_name, exit status: $exit_status, output:\n" . (defined($output) ? join("\n", @$output) : ''));
+			next;
+		}
+		
+		($exit_status, $output) = $self->os->execute("systemctl is-active $service_name");
+		$output_string = (defined($output) ? join('', @$output) : '');
+		if ($output_string !~ /^\s*(inactive|failed)\s*$/m) {
+			notify($ERRORS{'WARNING'}, 0, "failed to stop $service_name on $computer_name, systemctl is-active output:\n$output_string");
+		}
+	}
+	
+	return 1;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
 =head2 process_reserved
 
  Parameters  : none
  Returns     : boolean
  Description : Configures the iptables firewall for the reserved state:
                * A vcl-reserved chain is created with rules allowing traffic to
-                 the connect method ports from any IP address.
+                 the connect method ports from any IP address in button mode
+                 and from connect_ip_range in ip_range mode.
 
 =cut
 
@@ -244,6 +305,12 @@ sub process_reserved {
 	
 	my $reserved_chain_name = $self->get_reserved_chain_name();
 	
+	# The source address the connect method ports are opened to comes from
+	# vcld.conf: in button mode the reserved stage accepts traffic from any
+	# address, in ip_range mode only from the configured range.
+	my $allowed_source = $self->get_allowed_source('reserved');
+	my $source_description = defined($allowed_source) ? $allowed_source : 'any IP address';
+	
 	# Delete existing chain if one exists to prevent inconsistent results
 	# Create a chain and add a jump rule to INPUT chain
 	$self->create_chain('filter', $reserved_chain_name);
@@ -266,18 +333,20 @@ sub process_reserved {
 	my @protocol_ports = $self->data->get_connect_method_protocol_port_array();
 	for my $protocol_port (@protocol_ports) {
 		my ($protocol, $port) = @$protocol_port;
+		my %parameters = (
+			'protocol' => $protocol,
+			'jump' => 'ACCEPT',
+		);
+		$parameters{'source'} = $allowed_source if (defined($allowed_source));
 		if (!$self->insert_rule('filter', $reserved_chain_name,
 			{
-				'parameters' => {
-					'protocol' => $protocol,
-					'jump' => 'ACCEPT',
-				},
+				'parameters' => \%parameters,
 				'match_extensions' => {
 					$protocol => {
 						'dport' => $port,
 					},
 					'comment' => {
-						'comment' => "VCL: allow traffic from any IP address to connect method ports during reserved stage of reservation $reservation_id ($timestamp)",
+						'comment' => "VCL: allow traffic from $source_description to connect method ports during reserved stage of reservation $reservation_id ($timestamp)",
 					},
 				},
 			}
@@ -295,21 +364,185 @@ sub process_reserved {
 
 #//////////////////////////////////////////////////////////////////////////////
 
+=head2 get_firewall_config
+
+ Parameters  : none
+ Returns     : hash reference: { mode => 'button'|'ip_range', range => CIDR or undefined }
+ Description : Resolves how the connect method ports of a reservation are
+               opened from the management node configuration:
+               * connect_mode=button (default when the parameter is
+                 not set): the reserved stage has no source restriction and the
+                 inuse stage only allows reservation.remoteIP, which is the
+                 previous VCL behavior.
+               * connect_mode=ip_range: both stages only allow
+                 connect_ip_range.
+               The range is IPv4 only. A bare address is treated as a /32 and
+               0.0.0.0 is normalized to 0.0.0.0/0. A missing or invalid range
+               and an unknown mode fall back to button mode and log a WARNING.
+
+=cut
+
+sub get_firewall_config {
+	my $self = shift;
+	
+	my $mode = $self->_trim($VCL::utils::CONNECT_MODE);
+	$mode = '' if (!defined($mode));
+	
+	# Not configured or configured empty: previous behavior
+	return { 'mode' => 'button', 'range' => undef } if ($mode eq '');
+	
+	return { 'mode' => 'button', 'range' => undef } if ($mode eq 'button');
+	
+	if ($mode ne 'ip_range') {
+		notify($ERRORS{'WARNING'}, 0, "invalid connect_mode value '$mode', supported values are 'button' and 'ip_range', using button mode, the reserved stage will accept any address");
+		return { 'mode' => 'button', 'range' => undef };
+	}
+	
+	my $range = $self->_trim($VCL::utils::CONNECT_IP_RANGE);
+	$range = '' if (!defined($range));
+	
+	if ($range eq '') {
+		notify($ERRORS{'WARNING'}, 0, "connect_mode is 'ip_range' but connect_ip_range is not set, using button mode, the reserved stage will accept any address");
+		return { 'mode' => 'button', 'range' => undef };
+	}
+	
+	my $normalized_range = $self->_normalize_ipv4_range($range);
+	if (!defined($normalized_range)) {
+		notify($ERRORS{'WARNING'}, 0, "invalid connect_ip_range value '$range', expected an IPv4 address or CIDR, using button mode, the reserved stage will accept any address");
+		return { 'mode' => 'button', 'range' => undef };
+	}
+	
+	return { 'mode' => 'ip_range', 'range' => $normalized_range };
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 _trim
+
+ Parameters  : $value (string or undefined)
+ Returns     : the string without leading and trailing whitespace, or undefined
+               if the argument is undefined
+ Description : Removes leading and trailing whitespace. Used for the values read
+               from vcld.conf and for the Connect remote IP address, which may
+               arrive padded with whitespace.
+
+=cut
+
+sub _trim {
+	my $self = shift;
+	my $value = shift;
+	return if (!defined($value));
+	$value =~ s/^\s+|\s+$//g;
+	return $value;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 _normalize_ipv4_range
+
+ Parameters  : $range (address or CIDR)
+ Returns     : normalized CIDR or undefined if invalid
+ Description : Validates an IPv4 address or CIDR and returns it with an explicit
+               mask. 0.0.0.0 is normalized to 0.0.0.0/0 and an address without
+               a mask gets /32.
+
+=cut
+
+sub _normalize_ipv4_range {
+	my $self = shift;
+	my $range = shift;
+	
+	my ($address, $mask) = $range =~ /^(\d{1,3}(?:\.\d{1,3}){3})(?:\/(\d{1,2}))?$/;
+	return if (!defined($address));
+	
+	for my $octet (split(/\./, $address)) {
+		return if ($octet > 255);
+	}
+	
+	if (!defined($mask)) {
+		# A single address is a single host, 0.0.0.0 means any address
+		$mask = ($address eq '0.0.0.0') ? 0 : 32;
+	}
+	elsif ($mask > 32) {
+		return;
+	}
+	
+	return "$address/$mask";
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
+=head2 get_allowed_source
+
+ Parameters  : $stage ('reserved' or 'inuse'), $remote_ip_address (optional)
+ Returns     : string or undefined
+ Description : Returns the source address (CIDR) or IP address the connect
+               method ports are opened to for the given stage, based on the
+               firewall configuration returned by get_firewall_config:
+               * button mode: the reserved stage has no source restriction
+                 (undefined is returned) and the inuse stage only allows the
+                 remote IP address of the Connect request (undefined is
+                 returned if it is not available)
+               * ip_range mode: the configured range is returned for both stages
+               Undefined means no source restriction is applied to the rule.
+               Any other stage value logs a WARNING and returns undefined.
+
+=cut
+
+sub get_allowed_source {
+	my $self = shift;
+	if (ref($self) !~ /VCL::Module/i) {
+		notify($ERRORS{'CRITICAL'}, 0, "subroutine was called as a function, it must be called as a class method");
+		return;
+	}
+	
+	my $argument_stage = shift;
+	my $argument_remote_ip = shift;
+	
+	my @supported_stages = qw(reserved inuse);
+	if (!defined($argument_stage) || !grep { $_ eq $argument_stage } @supported_stages) {
+		notify($ERRORS{'WARNING'}, 0, "invalid stage argument passed to get_allowed_source: '" . (defined($argument_stage) ? $argument_stage : '<undef>') . "', supported stages are 'reserved' and 'inuse'");
+		return;
+	}
+	
+	my $firewall_config = $self->get_firewall_config();
+	
+	# In ip_range mode the configured range is the only allowed source, in both
+	# the reserved and the inuse stage
+	if ($firewall_config->{mode} eq 'ip_range' && defined($firewall_config->{range})) {
+		return $firewall_config->{range};
+	}
+	
+	# In button mode the reserved stage has to accept the Connect request from
+	# any address
+	return if ($argument_stage ne 'inuse');
+	
+	if (defined($argument_remote_ip)) {
+		$argument_remote_ip = $self->_trim($argument_remote_ip);
+		return if ($argument_remote_ip eq '');
+	}
+	
+	return $argument_remote_ip;
+}
+
+#//////////////////////////////////////////////////////////////////////////////
+
 =head2 process_inuse
 
  Parameters  : $remote_ip_address (optional)
  Returns     : boolean
  Description : Configures the iptables firewall for the inuse state:
                * A vcl-inuse chain is created if it does not already exist.
-               * Rules are added to the vcl-inuse chain allowing to allow
-                 traffic to the connect method ports from the end user's
-                 specific IP address.
-               * The vcl-reserved chain is deleted if it exists.
+               * Rules are added to the vcl-inuse chain allowing traffic to the
+                 connect method ports from the address returned by
+                 get_allowed_source. In button mode that is the remote IP
+                 address of the Connect request (previous VCL behavior), in
+                 ip_range mode it is connect_ip_range.
+               * The vcl-reserved chain is deleted if it exists, the rules in
+                 the new chain replace it.
                
                This subroutine can be called over and over again. It will not
-               remove rules previously added to the vcl-inuse chain. If a user's
-               remote IP address changes, this subroutine will add a new rule to
-               the vcl-inuse chain.
+               remove rules previously added to the vcl-inuse chain.
 
 =cut
 
@@ -330,9 +563,13 @@ sub process_inuse {
 	
 	my $timestamp = makedatestring();
 	
-	my $remote_ip_address = shift || $self->data->get_reservation_remote_ip();
-	if (!$remote_ip_address) {
-		notify($ERRORS{'WARNING'}, 0, "failed to complete firewall inuse configuration on $computer_name, remote IP could not be retrieved for reservation");
+	# The source address the connect method ports are opened to comes from
+	# vcld.conf: in button mode only the remote IP address of the Connect
+	# request is allowed, in ip_range mode the configured range is used.
+	my $argument_remote_ip = shift;
+	my $allowed_source = $self->get_allowed_source('inuse', $argument_remote_ip);
+	if (!$allowed_source) {
+		notify($ERRORS{'WARNING'}, 0, "failed to complete firewall inuse configuration on $computer_name, no allowed source could be determined (connect_mode is 'button' and the Connect remote IP is not set)");
 		return;
 	}
 	
@@ -367,7 +604,7 @@ sub process_inuse {
 			{
 				'parameters' => {
 					'protocol' => $protocol,
-					'source' => "$remote_ip_address",
+					'source' => "$allowed_source",
 					'jump' => 'ACCEPT',
 				},
 				'match_extensions' => {
@@ -375,7 +612,7 @@ sub process_inuse {
 						'dport' => $port,
 					},
 					'comment' => {
-						'comment' => "VCL: allow traffic from $remote_ip_address to $protocol/$port during the inuse stage of reservation $reservation_id ($timestamp)",
+						'comment' => "VCL: allow traffic from $allowed_source to $protocol/$port during the inuse stage of reservation $reservation_id ($timestamp)",
 					},
 				},
 			}
@@ -385,7 +622,8 @@ sub process_inuse {
 		}
 	}
 	
-	# Delete the reserved chain which allows traffic from any address
+	# Delete the reserved chain, the rules added to the inuse chain above
+	# replace it
 	$self->delete_chain('filter', $reserved_chain_name);
 	
 	$self->save_configuration();
@@ -2360,7 +2598,9 @@ sub nat_add_port_forward {
  Returns     : boolean
  Description : Saves the current iptables configuration by running
                iptables-save. If no file path argument is provided, the output
-               is saved to /etc/sysconfig/iptables.
+               is saved to /etc/sysconfig/iptables on distributions that have
+               that directory (Red Hat) and to /var/lib/vcl/iptables.save on
+               distributions that do not (Ubuntu).
 
 =cut
 
@@ -2371,7 +2611,20 @@ sub save_configuration {
 		return 0;
 	}
 	
-	my $file_path = shift || '/etc/sysconfig/iptables';
+	my $file_path = shift;
+	if (!$file_path) {
+		# Red Hat keeps the saved rules in /etc/sysconfig/iptables. Ubuntu has no
+		# /etc/sysconfig, so a VCL owned path is used instead. The rules are
+		# re-applied on every reservation stage; this file is only a fallback
+		# for a manual restore.
+		if ($self->os->file_exists('/etc/sysconfig')) {
+			$file_path = '/etc/sysconfig/iptables';
+		}
+		else {
+			$self->os->execute('mkdir -p /var/lib/vcl');
+			$file_path = '/var/lib/vcl/iptables.save';
+		}
+	}
 	
 	my $computer_id = $self->data->get_computer_id();
 	my $computer_name = $self->data->get_computer_hostname();

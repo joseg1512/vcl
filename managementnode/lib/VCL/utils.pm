@@ -364,6 +364,9 @@ our $RETURNPATH;
 
 our $WINDOWS_ROOT_PASSWORD;
 
+our $CONNECT_MODE;
+our $CONNECT_IP_RANGE;
+
 our $XMLRPC_USER;
 our $XMLRPC_PASS;
 our $XMLRPC_URL;
@@ -431,6 +434,8 @@ INIT {
 		'jabresource'				=> \$JABBER_RESOURCE,
 		'processname'				=> \$PROCESSNAME,
 		'windows_root_password'	=> \$WINDOWS_ROOT_PASSWORD,
+		'connect_mode'				=> \$CONNECT_MODE,
+		'connect_ip_range'			=> \$CONNECT_IP_RANGE,
 		'verbose'					=> \$VERBOSE,
 		'defaulthelpemail'		=> \$DEFAULTHELPEMAIL,
 	);
