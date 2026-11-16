@@ -1875,7 +1875,7 @@ sub get_table_info {
 			^
 			(--?[a-z\-]+)	# command: -A, -N, etc
 			\s+				# space after command
-			([^ ]+)			# chain name
+			(\S+)			# chain name
 			\s*				# space after chain name
 			(.*)				# remainder of rule
 			\s*				# trailing spaces
@@ -1890,6 +1890,7 @@ sub get_table_info {
 			notify($ERRORS{'WARNING'}, 0, "failed to parse iptables rule, iptables chain name could not be parsed from line:\n$line");
 			next LINE;
 		}
+		$chain_name =~ s/^\s+|\s+$//g;
 		
 		# Make sure the rule specification isn't null to avoid warnings
 		$rule_specification_string = '' unless defined($rule_specification_string);
