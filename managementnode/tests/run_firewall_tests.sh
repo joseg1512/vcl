@@ -14,7 +14,7 @@
 tests_directory=$(cd "$(dirname "$0")" && pwd)/firewall
 
 worst_status=0
-for test_name in test_vcld_conf.pl test_allowed_source.pl test_ubuntu_paths.pl; do
+for test_name in test_vcld_conf.pl test_allowed_source.pl test_ubuntu_paths.pl test_chain_name_trim.pl; do
 	printf '=== %s\n' "$test_name"
 	perl "$tests_directory/$test_name"
 	test_status=$?
